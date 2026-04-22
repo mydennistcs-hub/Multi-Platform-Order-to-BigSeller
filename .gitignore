@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+dist/
+
+# Local data / exports (may include sensitive order/customer info)
+Data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
