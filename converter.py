@@ -443,7 +443,10 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress):
 
     # 3. 讀取模板店铺名稱
     log("正在讀取 BigSeller 模板...")
-    bs_wb_r = openpyxl.load_workbook(template_path, data_only=True)
+    tmpl_buf = _decrypt_office(template_path, password)
+    if tmpl_buf:
+        log("  [已解密並移除密碼] BigSeller 模板 Excel")
+    bs_wb_r = openpyxl.load_workbook(tmpl_buf or template_path, data_only=True)
     store_name = bs_wb_r.active.cell(row=BS_DATA_ROW, column=BS["store"]).value or ""
     bs_wb_r.close()
     log(f"店铺名称: {store_name or '（空白，請在輸出後補填）'}")
@@ -623,9 +626,9 @@ class App:
             side=tk.LEFT, padx=4
         )
 
-        # ── PDF 密碼 ──────────────────────────────────────────────────────
+        # ── PDF / Excel 密碼 ───────────────────────────────────────────────
         pw_frame = ttk.LabelFrame(
-            root_frame, text="  PDF 解密密碼（若無加密請留空）  ", padding=10
+            root_frame, text="  PDF / Excel 解密密碼（若無加密請留空）  ", padding=10
         )
         pw_frame.pack(fill=tk.X, pady=(0, 8))
 
