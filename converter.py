@@ -70,6 +70,7 @@ BS = {
     "qty":       30,   # AD
 }
 
+MO_STORE = "格魯維爾 mo店+"
 WAREHOUSE = "樸翔初耘18號8樓 mo店+倉庫"
 COUPANG_STORE = "格魯維爾 coupang"
 COUPANG_WAREHOUSE = "樸翔初耘18號8樓 Coupang倉庫"
@@ -437,6 +438,23 @@ def _read_coupang_rows(path: str) -> list:
 
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws = wb.active
+    expected_headers = {
+        COUPANG["order_no"]: "訂單編號",
+        COUPANG["logistics"]: "快遞公司",
+        COUPANG["tracking"]: "寄件單號",
+        COUPANG["order_date"]: "訂購日期",
+        COUPANG["sku"]: "公司商品代碼",
+        COUPANG["qty"]: "數量",
+        COUPANG["price"]: "選項價格",
+        COUPANG["recipient"]: "訂購人姓名",
+        COUPANG["address"]: "收件人地址",
+    }
+    for col, expected in expected_headers.items():
+        actual = str(ws.cell(row=1, column=col).value or "").strip()
+        if actual != expected:
+            wb.close()
+            raise ValueError(f"Coupang 訂單欄位格式不符：第 {col} 欄應為「{expected}」，目前是「{actual}」")
+
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     wb.close()
     return rows
@@ -516,7 +534,7 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 
             source_rows.append({
                 "source": "mo店+",
-                "store": None,  # 稍後從模板 A5 讀取
+                "store": MO_STORE,
                 "warehouse": WAREHOUSE,
                 "fee": PLATFORM_FEE,
                 "order_no": order_no,
@@ -565,16 +583,15 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
     log(f"總計 {len(source_rows)} 筆待處理訂單行")
     progress(35)
 
-    # 3. 讀取模板店铺名稱
+    # 3. 確認 BigSeller 模板可讀取；店鋪名稱依來源平台固定指定
     log("正在讀取 BigSeller 模板...")
     tmpl_buf = _decrypt_office(template_path, password)
     if tmpl_buf:
         log("  [已解密並移除密碼] BigSeller 模板 Excel")
     bs_wb_r = openpyxl.load_workbook(tmpl_buf or template_path, data_only=True)
-    mo_store_name = bs_wb_r.active.cell(row=BS_DATA_ROW, column=BS["store"]).value or ""
     bs_wb_r.close()
     if mo_path:
-        log(f"mo店+ 店铺名称: {mo_store_name or '（空白，請在輸出後補填）'}")
+        log(f"mo店+ 店铺名称: {MO_STORE}")
     if coupang_path:
         log(f"Coupang 店铺名称: {COUPANG_STORE}")
     progress(40)
@@ -586,8 +603,6 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 
     for i, d in enumerate(source_rows):
         progress(40 + int(i / total * 28))
-        if d["source"] == "mo店+":
-            d["store"] = mo_store_name
 
         key = (d["source"], d["order_no"], d["sku"], d["price"])
 
