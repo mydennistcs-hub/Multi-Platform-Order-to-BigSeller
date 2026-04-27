@@ -356,6 +356,28 @@ def _as_number(value, default=0):
         return default
 
 
+def _format_order_datetime(value):
+    """BigSeller accepts yyyy/mm/dd hh:mm or dd/mm/yyyy hh:mm."""
+    if value in (None, ""):
+        return value
+    if isinstance(value, datetime):
+        return value.strftime("%Y/%m/%d %H:%M")
+
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y/%m/%d %H:%M")
+        except ValueError:
+            pass
+
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::\d{2})?)?$", s)
+    if m:
+        yyyy, mm, dd, hh, minute = m.groups()
+        return f"{int(yyyy):04d}/{int(mm):02d}/{int(dd):02d} {int(hh or 0):02d}:{int(minute or 0):02d}"
+
+    return s
+
+
 def _decrypt_office(path: str, password: str) -> io.BytesIO | None:
     """若 Office 檔案有加密，解密後移除密碼覆蓋原檔，並回傳解密內容 BytesIO；否則回傳 None。"""
     with open(path, "rb") as f:
@@ -594,7 +616,7 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 
         out_ws.cell(row=idx, column=BS["store"]).value     = d["store"]
         out_ws.cell(row=idx, column=BS["order_no"]).value  = d["order_no"]
-        out_ws.cell(row=idx, column=BS["date"]).value      = d["date"]
+        out_ws.cell(row=idx, column=BS["date"]).value      = _format_order_datetime(d["date"])
         out_ws.cell(row=idx, column=BS["warehouse"]).value = d["warehouse"]
         out_ws.cell(row=idx, column=BS["recipient"]).value = d["recipient"]
         out_ws.cell(row=idx, column=BS["address"]).value   = d["address"]
