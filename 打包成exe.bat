@@ -17,7 +17,15 @@ pip install pyinstaller >nul 2>&1
 
 echo 正在打包中，請稍候（約 1~2 分鐘）...
 cd /d "%~dp0"
-pyinstaller --onefile --windowed --name "mo訂單轉BigSeller" --hidden-import openpyxl converter.py
+pyinstaller --noconfirm --clean --onefile --windowed --name "mo訂單轉BigSeller" ^
+  --hidden-import openpyxl ^
+  --hidden-import xlrd ^
+  --hidden-import pdfplumber ^
+  --hidden-import pypdf ^
+  --hidden-import msoffcrypto ^
+  --collect-all pdfplumber ^
+  --collect-all pdfminer ^
+  converter.py
 
 if errorlevel 1 (
     echo.
