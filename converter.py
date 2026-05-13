@@ -465,16 +465,34 @@ def _read_coupang_rows(path: str) -> list:
 def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, coupang_path=""):
     progress(3)
 
-    # 1. 處理 mo店+ PDF，取得收件人資訊
+    # 1. 處理 PDF（mo店+ 和 Coupang 共用）
     pdf_data = {}
     pdf_by_tracking_extra: dict = {}
-    if pdf_paths and mo_path:
+    if pdf_paths:
         log(f"正在處理 {len(pdf_paths)} 個 PDF 文件...")
         pdf_data, pdf_by_tracking_extra = process_pdfs(pdf_paths, password, log)
         log(f"PDF 處理完成：{len(pdf_data)} 個訂單號配對，{len(pdf_by_tracking_extra)} 個僅物流單號配對")
-    elif pdf_paths:
-        log("已選擇 PDF，但未選 mo店+ 訂單 Excel；PDF 將略過（Coupang 以 Excel 欄位為準）")
     progress(20)
+
+    # 合併物流單號索引（mo店+ 和 Coupang 共用）
+    pdf_tracking_index: dict = {}
+    for entry in pdf_data.values():
+        if entry.get("tracking"):
+            pdf_tracking_index[entry["tracking"]] = entry
+    pdf_tracking_index.update(pdf_by_tracking_extra)
+
+    def _lookup_pdf(order_no: str, excel_tracking: str) -> dict:
+        """先以訂單號配對，找不到再以物流單號前綴或包含比對（容忍截斷與前置字母差異）。"""
+        if order_no in pdf_data:
+            return pdf_data[order_no]
+        if excel_tracking:
+            t = excel_tracking.strip()
+            for pdf_track, entry in pdf_tracking_index.items():
+                if (pdf_track.startswith(t) or t.startswith(pdf_track)
+                        or (len(t) >= 6 and t in pdf_track)
+                        or (len(pdf_track) >= 6 and pdf_track in t)):
+                    return entry
+        return {}
 
     source_rows: list[dict] = []
 
@@ -486,23 +504,6 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
             if r[MO["order_no"] - 1] not in (None, "")
             and str(r[MO["status"] - 1]).strip() in ("已印單", "已印單待寄件")
         ]
-
-        # 合併兩個來源的物流單號索引（供前綴比對）
-        pdf_tracking_index: dict = {}
-        for entry in pdf_data.values():
-            if entry.get("tracking"):
-                pdf_tracking_index[entry["tracking"]] = entry
-        pdf_tracking_index.update(pdf_by_tracking_extra)  # 加入僅物流單號的條目
-
-        def _lookup_pdf(order_no: str, mo_tracking: str) -> dict:
-            """先以訂單號配對，找不到再以物流單號前綴比對。"""
-            if order_no in pdf_data:
-                return pdf_data[order_no]
-            if mo_tracking:
-                for pdf_track, entry in pdf_tracking_index.items():
-                    if pdf_track.startswith(mo_tracking) or mo_tracking.startswith(pdf_track):
-                        return entry
-            return {}
 
         # 若有上傳 PDF，只保留有對應 PDF 的 mo店+ 訂單（無對應表示已處理，略過）
         if pdf_paths:
@@ -559,17 +560,29 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 
         for row in coupang_rows:
             raw_sku = str(_cell(row, COUPANG["sku"]) or "").strip()
+            order_no = str(_cell(row, COUPANG["order_no"])).strip()
+            tracking = _cell(row, COUPANG["tracking"])
+
+            # 嘗試從 PDF 補充或修正物流單號
+            if pdf_data or pdf_by_tracking_extra:
+                pdf_info = _lookup_pdf(order_no, str(tracking or "").strip())
+                if pdf_info.get("tracking"):
+                    new_tracking = pdf_info["tracking"]
+                    if new_tracking != str(tracking or "").strip():
+                        log(f"  Coupang {order_no}：運單號由 [{tracking or '空'}] 補全為 [{new_tracking}]")
+                    tracking = new_tracking
+
             source_rows.append({
                 "source": "Coupang",
                 "store": COUPANG_STORE,
                 "warehouse": COUPANG_WAREHOUSE,
                 "fee": COUPANG_PLATFORM_FEE,
-                "order_no": str(_cell(row, COUPANG["order_no"])).strip(),
+                "order_no": order_no,
                 "date": _cell(row, COUPANG["order_date"]),
                 "recipient": _cell(row, COUPANG["recipient"]),
                 "address": _cell(row, COUPANG["address"]),
                 "logistics": _cell(row, COUPANG["logistics"]),
-                "tracking": _cell(row, COUPANG["tracking"]),
+                "tracking": tracking,
                 "sku": f"{raw_sku}{COUPANG_SKU_SUFFIX}",
                 "price": _as_number(_cell(row, COUPANG["price"])),
                 "qty": _as_number(_cell(row, COUPANG["qty"])),
