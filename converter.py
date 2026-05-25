@@ -304,6 +304,10 @@ def process_pdfs(pdf_paths: list, password: str, log) -> tuple[dict, dict]:
                 log(f"  [錯誤] {fname}: 無法解析 PDF 文字：{text_exc}")
                 continue
 
+            if not text.strip():
+                log(f"  {fname} → PDF 沒有可抽取文字，可能是掃描/圖片型物流標籤，無法自動讀取訂單號或物流單號")
+                continue
+
             info = extract_pdf_data(text)
 
             order_no = info.get("order_no")
@@ -464,6 +468,7 @@ def _read_coupang_rows(path: str) -> list:
 
 def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, coupang_path=""):
     progress(3)
+    empty_source_notes: list[str] = []
 
     # 1. 處理 PDF（mo店+ 和 Coupang 共用）
     pdf_data = {}
@@ -553,10 +558,17 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 
     if coupang_path:
         log("正在讀取 Coupang 訂單文件...")
+        coupang_all_rows = _read_coupang_rows(coupang_path)
+        if not coupang_all_rows:
+            empty_source_notes.append("Coupang Excel 只有標題列，沒有訂單資料")
+            log("Coupang 訂單 Excel 只有標題列，沒有任何訂單資料；請重新匯出含訂單明細的 DeliveryList")
         coupang_rows = [
-            r for r in _read_coupang_rows(coupang_path)
+            r for r in coupang_all_rows
             if _cell(r, COUPANG["order_no"]) not in (None, "")
         ]
+        if coupang_all_rows and not coupang_rows:
+            empty_source_notes.append("Coupang Excel 的訂單編號欄皆為空")
+            log("Coupang 訂單 Excel 有資料列，但訂單編號欄皆為空，未產生 Coupang 訂單")
 
         for row in coupang_rows:
             raw_sku = str(_cell(row, COUPANG["sku"]) or "").strip()
@@ -591,6 +603,12 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         log(f"Coupang 篩選出 {len(coupang_rows)} 筆待處理訂單行")
 
     if not source_rows:
+        details = "；".join(empty_source_notes)
+        if pdf_paths and not (pdf_data or pdf_by_tracking_extra):
+            pdf_note = "PDF 未抽到可配對的訂單號或物流單號"
+            details = f"{details}；{pdf_note}" if details else pdf_note
+        if details:
+            raise ValueError(f"沒有可處理的訂單：{details}")
         raise ValueError("沒有可處理的訂單，請至少選擇 mo店+ 或 Coupang 訂單 Excel")
 
     log(f"總計 {len(source_rows)} 筆待處理訂單行")
@@ -667,7 +685,7 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 class App:
     def __init__(self, root: tk.Tk):
         self.root          = root
-        self.root.title("mo店+ / Coupang → BigSeller 訂單轉換工具")
+        self.root.title("Multi-Platform Order → BigSeller 訂單轉換工具")
         self.root.geometry("880x740")
         self.root.minsize(720, 600)
         self.mo_file       = tk.StringVar()
@@ -689,7 +707,7 @@ class App:
         # 標題
         ttk.Label(
             root_frame,
-            text="mo店+ / Coupang  →  BigSeller  訂單格式轉換工具",
+            text="多平台訂單  →  BigSeller  訂單格式轉換工具",
             font=("Microsoft JhengHei UI", 15, "bold"),
         ).pack(pady=(0, 12))
 
@@ -865,6 +883,9 @@ class App:
         self.pbar["value"] = v
         self.plabel.config(text=f"進度：{v:.0f}%")
 
+    def _show_error(self, title: str, message: str):
+        self.root.after(0, lambda: messagebox.showerror(title, message))
+
     # ── 開始轉換 ──────────────────────────────────────────────────────────
 
     def _start(self):
@@ -907,6 +928,8 @@ class App:
                 )
             except Exception as exc:
                 self._log(f"✗ 轉換失敗：{exc}")
+                self._set_progress(0)
+                self._show_error("轉換失敗", str(exc))
             finally:
                 self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
 

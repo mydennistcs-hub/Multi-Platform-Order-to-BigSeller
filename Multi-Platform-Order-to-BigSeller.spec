@@ -31,7 +31,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='mo訂單轉BigSeller',
+    name='Multi-Platform-Order-to-BigSeller',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

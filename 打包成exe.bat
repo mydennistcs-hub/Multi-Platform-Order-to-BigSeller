@@ -17,7 +17,7 @@ pip install pyinstaller >nul 2>&1
 
 echo 正在打包中，請稍候（約 1~2 分鐘）...
 cd /d "%~dp0"
-pyinstaller --noconfirm --clean --onefile --windowed --name "mo訂單轉BigSeller" ^
+pyinstaller --noconfirm --clean --onefile --windowed --name "Multi-Platform-Order-to-BigSeller" ^
   --hidden-import openpyxl ^
   --hidden-import xlrd ^
   --hidden-import pdfplumber ^
@@ -37,7 +37,7 @@ if errorlevel 1 (
 echo.
 echo ============================================
 echo  打包完成！
-echo  執行檔位置: dist\mo訂單轉BigSeller.exe
+echo  執行檔位置: dist\Multi-Platform-Order-to-BigSeller.exe
 echo ============================================
 echo.
 
