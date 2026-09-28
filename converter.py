@@ -1,10 +1,19 @@
-import tkinter as tk
-from tkinter import filedialog, ttk, scrolledtext, messagebox
 import threading
 import os
 import re
 from datetime import datetime
 from collections import OrderedDict
+
+# 注意：tkinter 相關匯入（tk/filedialog/ttk/scrolledtext/messagebox）刻意不放在這裡，
+# 而是延後到檔案最下面的 `if __name__ == "__main__":` 區塊才匯入。
+# 原因：本檔案的 convert_orders() 等函式是純邏輯（只吃 log/progress callback，不碰任何 GUI
+# 元件），2026-08-05 起也被 api_sync/ui/converter_panel.py 用 `import converter` 的方式直接
+# 重用，改用 PySide6 元件另外重畫一份 UI（見 CLAUDE.md「訂單轉換」分頁說明）。converter.py 本身
+# 邏輯完全不變，只是讓「純邏輯」跟「Tkinter 版 GUI 進入點」的匯入解耦——這樣 Phase 2 的 App
+# 匯入這支檔案時就不需要連帶打包 Tkinter/Tcl-Tk 執行環境（Phase 2 的 PyInstaller spec 因此可以
+# 繼續排除 tkinter，見該檔案註解）。`class App` 內部方法（_build_ui 等）仍大量用到 tk./ttk./
+# filedialog./messagebox./scrolledtext.，這些是模組全域名稱、在方法「被呼叫時」才需要存在，
+# 不是在 class 定義當下就要存在，所以只要在 App(root) 真正被建立之前完成這個匯入即可（見檔尾）。
 
 # ── Auto-install dependencies ──────────────────────────────────────────────────
 def _ensure(pkg, mod=None):
@@ -26,6 +35,7 @@ import xlrd
 import msoffcrypto
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
+from openpyxl.utils import get_column_letter
 
 # ── mo店+ 來源欄位 (1-based) ────────────────────────────────────────────────────
 MO = {
@@ -38,7 +48,7 @@ MO = {
     "address":    29,  # AC 收件人地址
     "logistics":  31,  # AE 物流商
     "tracking":   32,  # AF 物流單號
-    "price":      43,  # AQ 商品售價
+    "price":      41,  # AO 商品售價（新版 mo店+ 匯出；實際以表頭定位）
 }
 
 # ── Coupang 來源欄位 (1-based) ─────────────────────────────────────────────────
@@ -60,19 +70,59 @@ BS = {
     "order_no":  2,    # B
     "date":      3,    # C
     "warehouse": 5,    # E  发货仓库
-    "recipient": 6,    # F
-    "address":   14,   # N
-    "discount":  21,   # U
-    "logistics": 22,   # V
-    "tracking":  23,   # W
-    "sku":       27,   # AA
-    "price":     29,   # AC
-    "qty":       30,   # AD
+    "recipient": 7,    # G  收件人姓名（新版模板新增 F 客户编码；實際以表頭定位）
+    "address":   15,   # O  详细地址
+    "discount":  22,   # V  优惠
+    "logistics": 23,   # W  物流名称
+    "tracking":  24,   # X  运单号
+    "sku":       28,   # AB 店铺SKU
+    "price":     30,   # AD 单价
+    "qty":       31,   # AE 数量
 }
 
-MO_STORE = "格魯維爾 mo店+"
+MO_HEADERS = {
+    "order_no":   ("訂單編號",),
+    "status":     ("訂單狀態",),
+    "order_date": ("轉單日",),
+    "sku":        ("商品原廠編號",),
+    "qty":        ("數量",),
+    "recipient":  ("收件人姓名",),
+    "address":    ("收件人地址",),
+    "logistics":  ("物流商",),
+    "tracking":   ("物流單號",),
+    "price":      ("商品售價",),
+}
+
+COUPANG_HEADERS = {
+    "order_no":   ("訂單編號",),
+    "logistics":  ("快遞公司",),
+    "tracking":   ("寄件單號",),
+    "order_date": ("訂購日期",),
+    "sku":        ("公司商品代碼",),
+    "qty":        ("數量",),
+    "price":      ("選項價格",),
+    "recipient":  ("訂購人姓名",),
+    "address":    ("收件人地址",),
+}
+
+BS_HEADERS = {
+    "store":     ("店铺",),
+    "order_no":  ("订单号",),
+    "date":      ("下单时间",),
+    "warehouse": ("发货仓库",),
+    "recipient": ("收件人姓名",),
+    "address":   ("详细地址",),
+    "discount":  ("优惠",),
+    "logistics": ("物流名称",),
+    "tracking":  ("运单号",),
+    "sku":       ("店铺SKU",),
+    "price":     ("单价",),
+    "qty":       ("数量",),
+}
+
+MO_STORE = "mo店+"
 WAREHOUSE = "樸翔初耘18號8樓 mo店+倉庫"
-COUPANG_STORE = "格魯維爾 coupang"
+COUPANG_STORE = "酷澎 coupang"
 COUPANG_WAREHOUSE = "樸翔初耘18號8樓 Coupang倉庫"
 
 BS_DATA_ROW  = 5
@@ -82,6 +132,13 @@ COUPANG_PLATFORM_FEE = 0.155
 COUPANG_SKU_SUFFIX   = "-cou94234570"
 # 寄件人地址關鍵字（用於排除寄件人地址）
 SENDER_KW = ["MOMO", "格魯維爾", "南園二路"]
+
+# 台灣地址完整格式（縣市＋路街巷弄＋門牌號），extract_pdf_data() 的第 2、4 步共用。
+ADDR_RE = re.compile(
+    r'((?:台北|新北|桃園|台中|台南|高雄|基隆|新竹|苗栗|彰化|南投'
+    r'|雲林|嘉義|屏東|宜蘭|花蓮|台東|澎湖|金門|連江'
+    r'|臺北|臺中|臺南|臺東)[市縣][^\n]{3,40}(?:路|街|巷|弄)[^\n]{1,15}號[^\n]{0,10})'
+)
 
 # ── PDF 處理 ───────────────────────────────────────────────────────────────────
 
@@ -208,7 +265,7 @@ def extract_pdf_data(text: str) -> dict:
     從 PDF 文字擷取：訂單號、物流單號、收件人姓名、收件地址。
     同時支援「運單」與「裝箱明細」格式。
     """
-    result = {"order_no": None, "tracking": None, "recipient": None, "address": None}
+    result = {"order_no": None, "tracking": None, "recipient": None, "address": None, "store_name": None}
 
     # 1. 訂單號（排除「寄貨訂單編號」）
     m = re.search(r'(?<!貨)訂單編號[：:]\s*(\w+)', text)
@@ -227,6 +284,17 @@ def extract_pdf_data(text: str) -> dict:
             result["tracking"] = m.group(1).strip()
             break
 
+    # 2-2. 超商取件門市（超商運單標籤上的門市名稱，例如 7-11 交貨便「取件／：旺泰／門市」）。
+    # 這個標籤是直書兩行標題「取件」「門市」中間夾一行「：門市名稱」，pdfplumber 抽取文字時
+    # 這幾個片段的順序常被打散（實測看到「取件」「旺泰」「：」「門市」這種順序，值反而排在
+    # 冒號前面），不能假設固定順序，改用「取件」與（不遠處的）「門市」之間的所有文字，
+    # 去除冒號與空白後剩下的就是門市名稱。用 `(?!人)` 避免比對到後面的「取件人」欄位。
+    m = re.search(r'取件(?!人)(.{0,20}?)門市', text, re.S)
+    if m:
+        store_name = re.sub(r'[：:\s]', '', m.group(1))
+        if store_name:
+            result["store_name"] = store_name
+
     # 2. 優先從「收執聯」段落取得完整收件人資訊
     collect_idx = text.find("收執聯")
     if collect_idx != -1:
@@ -234,11 +302,18 @@ def extract_pdf_data(text: str) -> dict:
         lines = _lines_after(section, "收件人", max_lines=6)
         # lines[0] = 地址, lines[1] = 電話, lines[2] = 姓名+郵遞區號
         for line in lines:
-            # 識別地址行（含 路/街/巷/弄/號 且非寄件人）
-            if any(c in line for c in ["路", "街", "巷", "弄", "號"]):
-                if not any(kw in line for kw in SENDER_KW):
-                    if not result["address"]:
-                        result["address"] = line
+            # 識別地址行：整行要能獨立比對出「縣市＋路街巷弄＋門牌號」的完整地址格式（跟第 4 步
+            # 共用 ADDR_RE），不能只靠「這行含路/街/巷/弄/號其中一個字」這種寬鬆判斷——實測部份
+            # 物流標籤（例如第三方物流/新竹貨運）用直書「收/件/人」欄位標籤，pdfplumber 擷取文字
+            # 時會把同一段地址切成兩行（例如「...南園二路381巷18」和下一行「號8樓」），前一行因為
+            # 含寄件人街名被 SENDER_KW 排除後，寬鬆判斷會誤把地址「後半截殘片」（例如「人 號8樓
+            # 款」）當成收件地址存下來（2026-08-02 使用者實測踩到：BigSeller 匯入檔的詳細地址
+            # 變成一段沒有意義的殘片）。改成嚴謹格式驗證後，殘片格式對不上就不會被接受，程式會
+            # 改用下面第 4 步的全文搜尋 fallback（用完整字串比對，不受行內斷行影響）。
+            addr_match = ADDR_RE.search(line)
+            if addr_match and not any(kw in line for kw in SENDER_KW):
+                if not result["address"]:
+                    result["address"] = addr_match.group(1).strip()
             # 識別姓名行（中文字 + 空格 + 郵遞區號）
             nm = re.match(r'^([\u4e00-\u9fff]{2,6})\s+\d{3,6}\s*$', line)
             if nm and not result["recipient"]:
@@ -263,14 +338,9 @@ def extract_pdf_data(text: str) -> dict:
                     result["recipient"] = name
                     break
 
-    # 4. 若還沒有地址，全文搜尋台灣地址
+    # 4. 若還沒有地址，全文搜尋台灣地址（跟第 2 步共用 ADDR_RE，不受行內斷行影響）
     if not result["address"]:
-        addr_re = re.compile(
-            r'((?:台北|新北|桃園|台中|台南|高雄|基隆|新竹|苗栗|彰化|南投'
-            r'|雲林|嘉義|屏東|宜蘭|花蓮|台東|澎湖|金門|連江'
-            r'|臺北|臺中|臺南|臺東)[市縣][^\n]{3,40}(?:路|街|巷|弄)[^\n]{1,15}號[^\n]{0,10})'
-        )
-        for m in addr_re.finditer(text):
+        for m in ADDR_RE.finditer(text):
             addr = m.group(1).strip()
             if not any(kw in addr for kw in SENDER_KW):
                 result["address"] = addr
@@ -283,8 +353,8 @@ def process_pdfs(pdf_paths: list, password: str, log) -> tuple[dict, dict]:
     """
     批次處理 PDF。
     回傳 (pdf_by_order, pdf_by_tracking)：
-      pdf_by_order   = {訂單號: {recipient, address, tracking}}
-      pdf_by_tracking = {物流單號: {recipient, address, tracking}}  ← 無訂單號的 PDF（如超商運單）
+      pdf_by_order   = {訂單號: {recipient, address, store_name, tracking}}
+      pdf_by_tracking = {物流單號: {recipient, address, store_name, tracking}}  ← 無訂單號的 PDF（如超商運單）
     """
     pdf_by_order:    dict = {}
     pdf_by_tracking: dict = {}
@@ -319,6 +389,8 @@ def process_pdfs(pdf_paths: list, password: str, log) -> tuple[dict, dict]:
                     entry["recipient"] = info["recipient"]
                 if info.get("address") and not entry.get("address"):
                     entry["address"] = info["address"]
+                if info.get("store_name") and not entry.get("store_name"):
+                    entry["store_name"] = info["store_name"]
                 if tracking and not entry.get("tracking"):
                     entry["tracking"] = tracking
                 log(
@@ -333,6 +405,8 @@ def process_pdfs(pdf_paths: list, password: str, log) -> tuple[dict, dict]:
                     entry["recipient"] = info["recipient"]
                 if info.get("address") and not entry.get("address"):
                     entry["address"] = info["address"]
+                if info.get("store_name") and not entry.get("store_name"):
+                    entry["store_name"] = info["store_name"]
                 entry["tracking"] = tracking
                 log(f"  {fname} → 無訂單號，物流單號: {tracking}  姓名: {info['recipient'] or '—'}")
             else:
@@ -347,7 +421,43 @@ def process_pdfs(pdf_paths: list, password: str, log) -> tuple[dict, dict]:
 # ── Excel 讀取 ─────────────────────────────────────────────────────────────────
 
 def _cell(row, col_1based):
+    if not col_1based or col_1based < 1 or col_1based > len(row):
+        return None
     return row[col_1based - 1]
+
+
+def _normalize_header(value) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def _resolve_columns(headers, aliases: dict, source_name: str) -> dict:
+    header_index = {}
+    for idx, value in enumerate(headers, start=1):
+        key = _normalize_header(value)
+        if key and key not in header_index:
+            header_index[key] = idx
+
+    resolved = {}
+    missing = []
+    for field, names in aliases.items():
+        found = None
+        for name in names:
+            found = header_index.get(_normalize_header(name))
+            if found:
+                break
+        if found:
+            resolved[field] = found
+        else:
+            missing.append(" / ".join(names))
+
+    if missing:
+        raise ValueError(f"{source_name} 欄位格式不符：找不到「{'、'.join(missing)}」欄位")
+
+    return resolved
+
+
+def _format_col_map(cols: dict, fields: list[str]) -> str:
+    return ", ".join(f"{field}={get_column_letter(cols[field])}" for field in fields)
 
 
 def _as_number(value, default=0):
@@ -383,6 +493,40 @@ def _format_order_datetime(value):
     return s
 
 
+def _validate_big_seller_rows(rows: list[dict]) -> None:
+    """在覆蓋模板前檢查 BigSeller 明確標示為必填的資料。
+
+    地址、物流、幣種等欄位在目前模板屬選填，不在這裡硬擋；訂單號、收件人、店鋪 SKU、
+    單價與數量若缺漏，則即使成功存成 Excel 也無法可靠匯入 BigSeller，應先停止並指出來源列。
+    """
+    problems = []
+    empty_skus = {SKU_SUFFIX, COUPANG_SKU_SUFFIX}
+    for index, row in enumerate(rows, start=1):
+        missing = []
+        if not str(row.get("store") or "").strip():
+            missing.append("店铺")
+        if not str(row.get("order_no") or "").strip():
+            missing.append("订单号")
+        if not str(row.get("recipient") or "").strip():
+            missing.append("收件人姓名")
+        sku = str(row.get("sku") or "").strip()
+        if not sku or sku in empty_skus:
+            missing.append("店铺SKU")
+        if row.get("price") is None or _as_number(row.get("price"), default=-1) < 0:
+            missing.append("单价")
+        if _as_number(row.get("qty"), default=0) <= 0:
+            missing.append("数量")
+        if missing:
+            source = row.get("source") or "未知來源"
+            order_no = row.get("order_no") or "無訂單號"
+            problems.append(f"第 {index} 筆（{source} / {order_no}）：{', '.join(missing)}")
+
+    if problems:
+        preview = "；".join(problems[:10])
+        more = f"；另有 {len(problems) - 10} 筆" if len(problems) > 10 else ""
+        raise ValueError(f"BigSeller 必填資料不完整，尚未覆蓋模板：{preview}{more}")
+
+
 def _decrypt_office(path: str, password: str) -> io.BytesIO | None:
     """若 Office 檔案有加密，解密後移除密碼覆蓋原檔，並回傳解密內容 BytesIO；否則回傳 None。"""
     with open(path, "rb") as f:
@@ -406,13 +550,15 @@ def _decrypt_office(path: str, password: str) -> io.BytesIO | None:
     return buf
 
 
-def _read_mo_rows(path: str, password: str = "") -> list:
+def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
     ext = os.path.splitext(path)[1].lower()
     buf = _decrypt_office(path, password)   # None = 無加密
 
     if ext == ".xls":
         wb = xlrd.open_workbook(file_contents=buf.read()) if buf else xlrd.open_workbook(path)
         ws = wb.sheet_by_index(0)
+        headers = ws.row_values(0)
+        columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
         rows = []
         for r in range(1, ws.nrows):
             vals  = ws.row_values(r)
@@ -426,42 +572,45 @@ def _read_mo_rows(path: str, password: str = "") -> list:
                         pass
                 processed.append(v)
             rows.append(tuple(processed))
-        return rows
+        return rows, columns
     else:
         wb = openpyxl.load_workbook(buf or path, data_only=True, read_only=True)
         ws = wb.active
+        headers = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         wb.close()
-        return rows
+        return rows, columns
 
 
-def _read_coupang_rows(path: str) -> list:
+def _read_coupang_rows(path: str) -> tuple[list, dict]:
     ext = os.path.splitext(path)[1].lower()
     if ext != ".xlsx":
         raise ValueError("Coupang 訂單文件目前需使用 .xlsx 格式")
 
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws = wb.active
-    expected_headers = {
-        COUPANG["order_no"]: "訂單編號",
-        COUPANG["logistics"]: "快遞公司",
-        COUPANG["tracking"]: "寄件單號",
-        COUPANG["order_date"]: "訂購日期",
-        COUPANG["sku"]: "公司商品代碼",
-        COUPANG["qty"]: "數量",
-        COUPANG["price"]: "選項價格",
-        COUPANG["recipient"]: "訂購人姓名",
-        COUPANG["address"]: "收件人地址",
-    }
-    for col, expected in expected_headers.items():
-        actual = str(ws.cell(row=1, column=col).value or "").strip()
-        if actual != expected:
-            wb.close()
-            raise ValueError(f"Coupang 訂單欄位格式不符：第 {col} 欄應為「{expected}」，目前是「{actual}」")
+    headers = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
 
+    # 2026-08-05 實測踩過的坑：Phase 2 API 主控台「Coupang → 訂單」查詢頁的「匯出 Excel」
+    # 產生的檔案，欄名（物流商/運單號/下單時間/賣家SKU/單價…）跟這裡要找的 Coupang Wing 後台
+    # 手動下載「DeliveryList」欄名（快遞公司/寄件單號/訂購日期/公司商品代碼/選項價格…）完全不同，
+    # 而且「單價」欄還是 "599 TWD" 這種帶幣別的字串（不是純數字），就算硬把欄名對上，優惠金額也會
+    # 被 _as_number() 悄悄算成 0——比報錯還危險。與其讓使用者看到語意不明的「找不到欄位」，
+    # 先用幾個該匯出檔獨有、DeliveryList 絕不會有的欄名組合偵測出來，直接講清楚原因與正確做法。
+    _APP_EXPORT_MARKERS = {"物流商", "運單號", "賣家SKU"}
+    _normalized_headers = {_normalize_header(h) for h in headers if h}
+    if _APP_EXPORT_MARKERS <= _normalized_headers:
+        raise ValueError(
+            "這份檔案看起來是「Multi-Platform API 管理主控台」Coupang 分頁「訂單」查詢結果的匯出檔，"
+            "不是 Coupang Wing 後台手動下載的「DeliveryList」——兩者欄位名稱與格式不同，無法直接轉換"
+            "（查詢結果只用來查看/核對資料）。請到 Coupang Wing 後台重新下載 DeliveryList Excel 再匯入。"
+        )
+
+    columns = _resolve_columns(headers, COUPANG_HEADERS, "Coupang 訂單 Excel")
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     wb.close()
-    return rows
+    return rows, columns
 
 
 # ── 主轉換邏輯 ─────────────────────────────────────────────────────────────────
@@ -487,27 +636,38 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
     pdf_tracking_index.update(pdf_by_tracking_extra)
 
     def _lookup_pdf(order_no: str, excel_tracking: str) -> dict:
-        """先以訂單號配對，找不到再以物流單號前綴或包含比對（容忍截斷與前置字母差異）。"""
+        """先以訂單號配對，找不到再以物流單號前綴或包含比對（容忍截斷與前置字母差異）。
+
+        找到訂單號配對後，**還會再用物流單號補查一次**並合併缺的欄位進來，不會直接回傳、
+        錯過另一份 PDF 才有的資料——實測裝箱明細（用訂單號配對）只有姓名、沒有取件門市，
+        超商運單（沒有訂單號、只能用物流單號配對）才有取件門市、但姓名是遮罩過的，兩份
+        PDF 各自缺一半資料，只挑一份回傳會漏掉另一份才有的欄位（例如門市名稱）。"""
+        result: dict = {}
         if order_no in pdf_data:
-            return pdf_data[order_no]
-        if excel_tracking:
-            t = excel_tracking.strip()
+            result.update(pdf_data[order_no])
+
+        tracking = (result.get("tracking") or excel_tracking or "").strip()
+        if tracking:
             for pdf_track, entry in pdf_tracking_index.items():
-                if (pdf_track.startswith(t) or t.startswith(pdf_track)
-                        or (len(t) >= 6 and t in pdf_track)
-                        or (len(pdf_track) >= 6 and pdf_track in t)):
-                    return entry
-        return {}
+                if (pdf_track.startswith(tracking) or tracking.startswith(pdf_track)
+                        or (len(tracking) >= 6 and tracking in pdf_track)
+                        or (len(pdf_track) >= 6 and pdf_track in tracking)):
+                    for field, value in entry.items():
+                        if value and not result.get(field):
+                            result[field] = value
+                    break
+        return result
 
     source_rows: list[dict] = []
 
     if mo_path:
         log("正在讀取 mo店+ 訂單文件...")
-        all_rows = _read_mo_rows(mo_path, password)
+        all_rows, mo_cols = _read_mo_rows(mo_path, password)
+        log(f"mo店+ 欄位定位：{_format_col_map(mo_cols, ['order_no', 'status', 'sku', 'price', 'qty'])}")
         mo_rows = [
             r for r in all_rows
-            if r[MO["order_no"] - 1] not in (None, "")
-            and str(r[MO["status"] - 1]).strip() in ("已印單", "已印單待寄件")
+            if _cell(r, mo_cols["order_no"]) not in (None, "")
+            and str(_cell(r, mo_cols["status"])).strip() in ("已印單", "已印單待寄件")
         ]
 
         # 若有上傳 PDF，只保留有對應 PDF 的 mo店+ 訂單（無對應表示已處理，略過）
@@ -516,8 +676,8 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
             mo_rows = [
                 r for r in mo_rows
                 if _lookup_pdf(
-                    str(r[MO["order_no"] - 1]).strip(),
-                    str(r[MO["tracking"] - 1] or "").strip()
+                    str(_cell(r, mo_cols["order_no"])).strip(),
+                    str(_cell(r, mo_cols["tracking"]) or "").strip()
                 )
             ]
             skipped = before - len(mo_rows)
@@ -525,16 +685,20 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 log(f"略過 {skipped} 筆無對應 PDF 的 mo店+ 訂單（視為已處理）")
 
         for row in mo_rows:
-            order_no = str(_cell(row, MO["order_no"])).strip()
-            tracking = _cell(row, MO["tracking"])
-            recipient = _cell(row, MO["recipient"])
-            address = _cell(row, MO["address"])
+            order_no = str(_cell(row, mo_cols["order_no"])).strip()
+            tracking = _cell(row, mo_cols["tracking"])
+            recipient = _cell(row, mo_cols["recipient"])
+            address = _cell(row, mo_cols["address"])
 
             pdf_info = _lookup_pdf(order_no, str(tracking or "").strip())
             if pdf_info.get("recipient"):
                 recipient = pdf_info["recipient"]
             if pdf_info.get("address"):
                 address = pdf_info["address"]
+            elif pdf_info.get("store_name") and address and "○" in str(address):
+                # 超商取貨訂單沒有街道地址，mo店+ 匯出的地址欄只會是「郵遞區號 超取 ○○○○○」
+                # 這種遮罩門市名稱的格式；用運單 PDF 抽到的「取件門市」把遮罩片段換成真實門市名稱。
+                address = re.sub(r"○+", pdf_info["store_name"], str(address))
             if pdf_info.get("tracking"):
                 tracking = pdf_info["tracking"]
 
@@ -544,36 +708,37 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 "warehouse": WAREHOUSE,
                 "fee": PLATFORM_FEE,
                 "order_no": order_no,
-                "date": _cell(row, MO["order_date"]),
+                "date": _cell(row, mo_cols["order_date"]),
                 "recipient": recipient,
                 "address": address,
-                "logistics": _cell(row, MO["logistics"]),
+                "logistics": _cell(row, mo_cols["logistics"]),
                 "tracking": tracking,
-                "sku": f"{str(_cell(row, MO['sku']) or '').strip()}{SKU_SUFFIX}",
-                "price": _as_number(_cell(row, MO["price"])),
-                "qty": _as_number(_cell(row, MO["qty"])),
+                "sku": f"{str(_cell(row, mo_cols['sku']) or '').strip()}{SKU_SUFFIX}",
+                "price": _as_number(_cell(row, mo_cols["price"])),
+                "qty": _as_number(_cell(row, mo_cols["qty"])),
             })
 
         log(f"mo店+ 篩選出 {len(mo_rows)} 筆待處理訂單行")
 
     if coupang_path:
         log("正在讀取 Coupang 訂單文件...")
-        coupang_all_rows = _read_coupang_rows(coupang_path)
+        coupang_all_rows, coupang_cols = _read_coupang_rows(coupang_path)
+        log(f"Coupang 欄位定位：{_format_col_map(coupang_cols, ['order_no', 'logistics', 'tracking', 'sku', 'price', 'qty'])}")
         if not coupang_all_rows:
             empty_source_notes.append("Coupang Excel 只有標題列，沒有訂單資料")
             log("Coupang 訂單 Excel 只有標題列，沒有任何訂單資料；請重新匯出含訂單明細的 DeliveryList")
         coupang_rows = [
             r for r in coupang_all_rows
-            if _cell(r, COUPANG["order_no"]) not in (None, "")
+            if _cell(r, coupang_cols["order_no"]) not in (None, "")
         ]
         if coupang_all_rows and not coupang_rows:
             empty_source_notes.append("Coupang Excel 的訂單編號欄皆為空")
             log("Coupang 訂單 Excel 有資料列，但訂單編號欄皆為空，未產生 Coupang 訂單")
 
         for row in coupang_rows:
-            raw_sku = str(_cell(row, COUPANG["sku"]) or "").strip()
-            order_no = str(_cell(row, COUPANG["order_no"])).strip()
-            tracking = _cell(row, COUPANG["tracking"])
+            raw_sku = str(_cell(row, coupang_cols["sku"]) or "").strip()
+            order_no = str(_cell(row, coupang_cols["order_no"])).strip()
+            tracking = _cell(row, coupang_cols["tracking"])
 
             # 嘗試從 PDF 補充或修正物流單號
             if pdf_data or pdf_by_tracking_extra:
@@ -590,14 +755,14 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 "warehouse": COUPANG_WAREHOUSE,
                 "fee": COUPANG_PLATFORM_FEE,
                 "order_no": order_no,
-                "date": _cell(row, COUPANG["order_date"]),
-                "recipient": _cell(row, COUPANG["recipient"]),
-                "address": _cell(row, COUPANG["address"]),
-                "logistics": _cell(row, COUPANG["logistics"]),
+                "date": _cell(row, coupang_cols["order_date"]),
+                "recipient": _cell(row, coupang_cols["recipient"]),
+                "address": _cell(row, coupang_cols["address"]),
+                "logistics": _cell(row, coupang_cols["logistics"]),
                 "tracking": tracking,
                 "sku": f"{raw_sku}{COUPANG_SKU_SUFFIX}",
-                "price": _as_number(_cell(row, COUPANG["price"])),
-                "qty": _as_number(_cell(row, COUPANG["qty"])),
+                "price": _as_number(_cell(row, coupang_cols["price"])),
+                "qty": _as_number(_cell(row, coupang_cols["qty"])),
             })
 
         log(f"Coupang 篩選出 {len(coupang_rows)} 筆待處理訂單行")
@@ -627,20 +792,34 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         log(f"Coupang 店铺名称: {COUPANG_STORE}")
     progress(40)
 
-    # 4. 整理訂單，以 (訂單號, SKU, 單價) 為 key 合併數量
+    # 4. 整理訂單，以 (訂單號, SKU) 為 key 合併數量。
+    #    同一 key 若單價不同（例如優惠拆算導致同一 SKU 的兩個品項行單價出現 1 元誤差），
+    #    以「加總金額 ÷ 加總數量」算出加權平均單價——等同把兩筆分開的金額（單價×數量）
+    #    直接加總，再除以合併後的總數量，寫入 BigSeller 的「優惠」欄（單價×數量×平台費率）
+    #    才不會因為原始資料被拆成兩筆而算出跟實際營收不一致的金額。
     log("正在整理並合併訂單資料...")
     order_map: dict = OrderedDict()
+    amount_totals: dict = {}
     total = len(source_rows)
 
     for i, d in enumerate(source_rows):
         progress(40 + int(i / total * 28))
 
-        key = (d["source"], d["order_no"], d["sku"], d["price"])
+        key = (d["source"], d["order_no"], d["sku"])
+        amount = (d["price"] or 0) * (d["qty"] or 0)
 
         if key in order_map:
             order_map[key]["qty"] += d["qty"]
+            amount_totals[key] += amount
         else:
             order_map[key] = dict(d)
+            amount_totals[key] = amount
+
+    for key, d in order_map.items():
+        if d["qty"]:
+            d["price"] = round(amount_totals[key] / d["qty"], 2)
+
+    _validate_big_seller_rows(list(order_map.values()))
 
     merged = len(order_map)
     log(f"合併後共 {merged} 筆（合併了 {total - merged} 個重複明細）")
@@ -650,6 +829,9 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
     log("正在寫入 BigSeller 模板...")
     out_wb = openpyxl.load_workbook(template_path)
     out_ws = out_wb.active
+    bs_headers = [out_ws.cell(row=1, column=c).value for c in range(1, out_ws.max_column + 1)]
+    bs_cols = _resolve_columns(bs_headers, BS_HEADERS, "BigSeller 模板")
+    log(f"BigSeller 欄位定位：{_format_col_map(bs_cols, ['store', 'order_no', 'recipient', 'address', 'discount', 'tracking', 'sku', 'price', 'qty'])}")
 
     # 清除第 5 列起的舊資料
     for row in out_ws.iter_rows(min_row=BS_DATA_ROW):
@@ -660,18 +842,18 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         progress(70 + int((idx - BS_DATA_ROW) / merged * 25))
         discount = round((d["price"] or 0) * (d["qty"] or 0) * d["fee"], 2)
 
-        out_ws.cell(row=idx, column=BS["store"]).value     = d["store"]
-        out_ws.cell(row=idx, column=BS["order_no"]).value  = d["order_no"]
-        out_ws.cell(row=idx, column=BS["date"]).value      = _format_order_datetime(d["date"])
-        out_ws.cell(row=idx, column=BS["warehouse"]).value = d["warehouse"]
-        out_ws.cell(row=idx, column=BS["recipient"]).value = d["recipient"]
-        out_ws.cell(row=idx, column=BS["address"]).value   = d["address"]
-        out_ws.cell(row=idx, column=BS["discount"]).value  = discount
-        out_ws.cell(row=idx, column=BS["logistics"]).value = d["logistics"]
-        out_ws.cell(row=idx, column=BS["tracking"]).value  = d["tracking"]
-        out_ws.cell(row=idx, column=BS["sku"]).value       = d["sku"]
-        out_ws.cell(row=idx, column=BS["price"]).value     = d["price"]
-        out_ws.cell(row=idx, column=BS["qty"]).value       = d["qty"]
+        out_ws.cell(row=idx, column=bs_cols["store"]).value     = d["store"]
+        out_ws.cell(row=idx, column=bs_cols["order_no"]).value  = d["order_no"]
+        out_ws.cell(row=idx, column=bs_cols["date"]).value      = _format_order_datetime(d["date"])
+        out_ws.cell(row=idx, column=bs_cols["warehouse"]).value = d["warehouse"]
+        out_ws.cell(row=idx, column=bs_cols["recipient"]).value = d["recipient"]
+        out_ws.cell(row=idx, column=bs_cols["address"]).value   = d["address"]
+        out_ws.cell(row=idx, column=bs_cols["discount"]).value  = discount
+        out_ws.cell(row=idx, column=bs_cols["logistics"]).value = d["logistics"]
+        out_ws.cell(row=idx, column=bs_cols["tracking"]).value  = d["tracking"]
+        out_ws.cell(row=idx, column=bs_cols["sku"]).value       = d["sku"]
+        out_ws.cell(row=idx, column=bs_cols["price"]).value     = d["price"]
+        out_ws.cell(row=idx, column=bs_cols["qty"]).value       = d["qty"]
 
     out_wb.save(template_path)
     progress(100)
@@ -683,7 +865,9 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
 # ── GUI ────────────────────────────────────────────────────────────────────────
 
 class App:
-    def __init__(self, root: tk.Tk):
+    # 型別註記故意不寫成 `root: tk.Tk`：函式參數註記在 `class App:` 被定義（也就是模組匯入）當下
+    # 就會被求值，但這時 tk 還沒被匯入（見檔案開頭說明），會直接 NameError。
+    def __init__(self, root):
         self.root          = root
         self.root.title("Multi-Platform Order → BigSeller 訂單轉換工具")
         self.root.geometry("880x740")
@@ -937,6 +1121,9 @@ class App:
 
 
 if __name__ == "__main__":
+    import tkinter as tk
+    from tkinter import filedialog, ttk, scrolledtext, messagebox  # noqa: F401 — App 內部方法會用到
+
     root = tk.Tk()
     App(root)
     root.mainloop()

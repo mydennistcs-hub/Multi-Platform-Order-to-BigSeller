@@ -1,0 +1,46 @@
+{
+  "accounts": [
+    {
+      "id": "Growell_momo",
+      "company": "格魯維爾",
+      "tax_id": "94234570",
+      "platform": "momo",
+      "expected_ip": "YOUR_DEDICATED_IP",
+      "credentials": { "token": "" }
+    },
+    {
+      "id": "Growell_coupang",
+      "company": "格魯維爾",
+      "tax_id": "94234570",
+      "platform": "coupang",
+      "expected_ip": "YOUR_DEDICATED_IP",
+      "credentials": { "vendor_id": "", "access_key": "", "secret_key": "" }
+    },
+    {
+      "id": "DennisSu_momo",
+      "company": "丹尼書",
+      "tax_id": "90154390",
+      "platform": "momo",
+      "expected_ip": "YOUR_DEDICATED_IP",
+      "credentials": { "token": "" }
+    },
+    {
+      "id": "DennisSu_coupang",
+      "company": "丹尼書",
+      "tax_id": "90154390",
+      "platform": "coupang",
+      "expected_ip": "YOUR_DEDICATED_IP",
+      "credentials": { "vendor_id": "", "access_key": "", "secret_key": "" }
+    },
+    {
+      "id": "your_store_shopify",
+      "company": "你的購物網站名稱",
+      "tax_id": "none",
+      "platform": "shopify",
+      "expected_ip": null,
+      "oauth_client_id": "",
+      "oauth_client_secret": "",
+      "credentials": { "store_domain": "your-store.myshopify.com", "access_token": "" }
+    }
+  ]
+}

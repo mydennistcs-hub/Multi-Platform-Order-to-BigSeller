@@ -1,45 +1,32 @@
 @echo off
-chcp 65001 >nul
-echo ============================================
-echo  打包 converter.py 為獨立 .exe 執行檔
-echo ============================================
-echo.
+rem -------------------------------------------------------------------
+rem  ASCII ONLY. Do NOT put Chinese text or "chcp 65001" in this file.
+rem
+rem  cmd.exe tracks its position in a batch file by BYTE offset but
+rem  decodes bytes using the current console code page. Any multi-byte
+rem  character therefore makes the parser drift, and later lines get
+rem  split mid-command ("'--hidden-import' is not recognized ...").
+rem  Big5/cp950 is no safer: its trail bytes include | \ ^ and `.
+rem  This is exactly what happened when this .bat was run on another PC
+rem  with a different console code page (2026-08-02).
+rem
+rem  All Chinese messages and all build logic live in
+rem  build_converter_exe.py -- Python prints Unicode to the Windows
+rem  console via WriteConsoleW, so it is immune to the code page.
+rem  Full explanation: docstring at the top of build_converter_exe.py.
+rem -------------------------------------------------------------------
+setlocal
+cd /d "%~dp0"
 
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [錯誤] 找不到 Python
+    echo [ERROR] Python not found. Install Python and add it to PATH.
     pause
     exit /b 1
 )
 
-echo 正在安裝 PyInstaller...
-pip install pyinstaller >nul 2>&1
-
-echo 正在打包中，請稍候（約 1~2 分鐘）...
-cd /d "%~dp0"
-pyinstaller --noconfirm --clean --onefile --windowed --name "Multi-Platform-Order-to-BigSeller" ^
-  --hidden-import openpyxl ^
-  --hidden-import xlrd ^
-  --hidden-import pdfplumber ^
-  --hidden-import pypdf ^
-  --hidden-import msoffcrypto ^
-  --collect-all pdfplumber ^
-  --collect-all pdfminer ^
-  converter.py
-
-if errorlevel 1 (
-    echo.
-    echo [錯誤] 打包失敗，請查看上方錯誤訊息
-    pause
-    exit /b 1
-)
-
+python build_converter_exe.py
+set "RC=%ERRORLEVEL%"
 echo.
-echo ============================================
-echo  打包完成！
-echo  執行檔位置: dist\Multi-Platform-Order-to-BigSeller.exe
-echo ============================================
-echo.
-
-explorer "%~dp0dist"
 pause
+exit /b %RC%

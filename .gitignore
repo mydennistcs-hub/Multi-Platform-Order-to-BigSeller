@@ -9,6 +9,16 @@ dist/
 # Local data / exports (may include sensitive order/customer info)
 Data/
 
+# Local API documents and real order/label samples (may include customer data)
+doc_ref/
+
+# API credentials (momo TOKEN / Coupang accessKey+secretKey / Shopify access_token)
+.env
+accounts.json
+
+# Shopify CLI 本機專案（app config link 產生，.shopify/ 內含 CLI session 資訊）
+shopify-app-config/
+
 # OS / editor
 .DS_Store
 Thumbs.db
