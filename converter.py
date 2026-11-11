@@ -80,6 +80,10 @@ BS = {
     "qty":       31,   # AE 数量
 }
 
+# mo店+ 後台匯出檔的「統編」欄是賣家自己的統編（實測 2026-11-11 匯出檔＝94234570），
+# 用來檢查使用者選的公司是否正確；舊格式沒有這欄時不檢查。
+MO_SELLER_TAX_ID_HEADER = "統編"
+
 MO_HEADERS = {
     "order_no":   ("訂單編號",),
     "status":     ("訂單狀態",),
@@ -127,11 +131,30 @@ COUPANG_WAREHOUSE = "樸翔初耘18號8樓 Coupang倉庫"
 
 BS_DATA_ROW  = 5
 PLATFORM_FEE = 0.235
-SKU_SUFFIX   = "-mo94234570"
 COUPANG_PLATFORM_FEE = 0.155
-COUPANG_SKU_SUFFIX   = "-cou94234570"
+
+# 公司 → 統編。兩家公司的店鋪名稱與倉庫相同（2026-11-12 使用者確認），
+# 只有店鋪 SKU 後綴不同：mo店+ 為 -mo{統編}、Coupang 為 -cou{統編}。
+COMPANIES = {
+    "格魯維爾": "94234570",
+    "丹尼書": "90154390",
+}
+DEFAULT_COMPANY = "格魯維爾"
+
+
+def mo_sku_suffix(tax_id: str) -> str:
+    return f"-mo{tax_id}"
+
+
+def coupang_sku_suffix(tax_id: str) -> str:
+    return f"-cou{tax_id}"
+
+
+# 舊常數保留（＝格魯維爾），供既有外部引用；轉檔一律改用依公司計算的後綴。
+SKU_SUFFIX   = mo_sku_suffix(COMPANIES[DEFAULT_COMPANY])
+COUPANG_SKU_SUFFIX   = coupang_sku_suffix(COMPANIES[DEFAULT_COMPANY])
 # 寄件人地址關鍵字（用於排除寄件人地址）
-SENDER_KW = ["MOMO", "格魯維爾", "南園二路"]
+SENDER_KW = ["MOMO", "格魯維爾", "丹尼書", "南園二路"]
 
 # 台灣地址完整格式（縣市＋路街巷弄＋門牌號），extract_pdf_data() 的第 2、4 步共用。
 ADDR_RE = re.compile(
@@ -456,6 +479,15 @@ def _resolve_columns(headers, aliases: dict, source_name: str) -> dict:
     return resolved
 
 
+def _optional_column(headers, name: str) -> int | None:
+    """找選填欄位（找不到回 None，不報錯）；以正規化後的完整欄名比對，「發票開立統編」不會誤中「統編」。"""
+    target = _normalize_header(name)
+    for idx, value in enumerate(headers, start=1):
+        if _normalize_header(value) == target:
+            return idx
+    return None
+
+
 def _format_col_map(cols: dict, fields: list[str]) -> str:
     return ", ".join(f"{field}={get_column_letter(cols[field])}" for field in fields)
 
@@ -500,7 +532,9 @@ def _validate_big_seller_rows(rows: list[dict]) -> None:
     單價與數量若缺漏，則即使成功存成 Excel 也無法可靠匯入 BigSeller，應先停止並指出來源列。
     """
     problems = []
-    empty_skus = {SKU_SUFFIX, COUPANG_SKU_SUFFIX}
+    empty_skus = {mo_sku_suffix(t) for t in COMPANIES.values()} | {
+        coupang_sku_suffix(t) for t in COMPANIES.values()
+    }
     for index, row in enumerate(rows, start=1):
         missing = []
         if not str(row.get("store") or "").strip():
@@ -559,6 +593,9 @@ def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
         ws = wb.sheet_by_index(0)
         headers = ws.row_values(0)
         columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
+        tax_col = _optional_column(headers, MO_SELLER_TAX_ID_HEADER)
+        if tax_col:
+            columns["seller_tax_id"] = tax_col
         rows = []
         for r in range(1, ws.nrows):
             vals  = ws.row_values(r)
@@ -578,6 +615,9 @@ def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
         ws = wb.active
         headers = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
         columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
+        tax_col = _optional_column(headers, MO_SELLER_TAX_ID_HEADER)
+        if tax_col:
+            columns["seller_tax_id"] = tax_col
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         wb.close()
         return rows, columns
@@ -615,7 +655,14 @@ def _read_coupang_rows(path: str) -> tuple[list, dict]:
 
 # ── 主轉換邏輯 ─────────────────────────────────────────────────────────────────
 
-def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, coupang_path=""):
+def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, coupang_path="",
+                   company=DEFAULT_COMPANY):
+    if company not in COMPANIES:
+        raise ValueError(f"未知的公司：{company}（可選：{'、'.join(COMPANIES)}）")
+    tax_id = COMPANIES[company]
+    mo_suffix = mo_sku_suffix(tax_id)
+    cou_suffix = coupang_sku_suffix(tax_id)
+    log(f"公司：{company}（統編 {tax_id}），SKU 後綴 mo店+ {mo_suffix}／Coupang {cou_suffix}")
     progress(3)
     empty_source_notes: list[str] = []
 
@@ -664,6 +711,24 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         log("正在讀取 mo店+ 訂單文件...")
         all_rows, mo_cols = _read_mo_rows(mo_path, password)
         log(f"mo店+ 欄位定位：{_format_col_map(mo_cols, ['order_no', 'status', 'sku', 'price', 'qty'])}")
+        if "seller_tax_id" in mo_cols:
+            file_tax_ids = {
+                str(_cell(r, mo_cols["seller_tax_id"]) or "").strip()
+                for r in all_rows
+                if _cell(r, mo_cols["order_no"]) not in (None, "")
+            } - {""}
+            wrong = sorted(file_tax_ids - {tax_id})
+            if wrong:
+                names = {v: k for k, v in COMPANIES.items()}
+                found = "、".join(f"{t}（{names.get(t, '未知公司')}）" for t in wrong)
+                raise ValueError(
+                    f"mo店+ 訂單 Excel 的「統編」是 {found}，跟選擇的公司「{company}」（{tax_id}）不符。"
+                    "請確認公司選擇或訂單檔是否放錯，尚未寫入模板。"
+                )
+            if file_tax_ids:
+                log(f"  mo店+ 訂單檔統編 {tax_id} 與選擇的公司一致")
+        else:
+            log("  mo店+ 訂單檔沒有「統編」欄，無法自動核對公司，請自行確認公司選擇正確")
         mo_rows = [
             r for r in all_rows
             if _cell(r, mo_cols["order_no"]) not in (None, "")
@@ -713,7 +778,7 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 "address": address,
                 "logistics": _cell(row, mo_cols["logistics"]),
                 "tracking": tracking,
-                "sku": f"{str(_cell(row, mo_cols['sku']) or '').strip()}{SKU_SUFFIX}",
+                "sku": f"{str(_cell(row, mo_cols['sku']) or '').strip()}{mo_suffix}",
                 "price": _as_number(_cell(row, mo_cols["price"])),
                 "qty": _as_number(_cell(row, mo_cols["qty"])),
             })
@@ -760,7 +825,7 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 "address": _cell(row, coupang_cols["address"]),
                 "logistics": _cell(row, coupang_cols["logistics"]),
                 "tracking": tracking,
-                "sku": f"{raw_sku}{COUPANG_SKU_SUFFIX}",
+                "sku": f"{raw_sku}{cou_suffix}",
                 "price": _as_number(_cell(row, coupang_cols["price"])),
                 "qty": _as_number(_cell(row, coupang_cols["qty"])),
             })
@@ -877,6 +942,7 @@ class App:
         self.template_file = tk.StringVar()
         self.pdf_files     = []
         self.password      = tk.StringVar()
+        self.company       = tk.StringVar(value=DEFAULT_COMPANY)
         self._build_ui()
 
     def _build_ui(self):
@@ -913,6 +979,21 @@ class App:
         self.pbar.pack(fill=tk.X, pady=(0, 4))
         self.plabel = ttk.Label(prog_frame, text="就緒，等待開始...")
         self.plabel.pack(anchor=tk.W)
+
+        # ── 公司（決定店鋪 SKU 後綴）────────────────────────────────────
+        company_frame = ttk.LabelFrame(
+            root_frame, text="  訂單所屬公司（決定 SKU 後綴）  ", padding=10
+        )
+        company_frame.pack(fill=tk.X, pady=(0, 8))
+        self.company_combo = ttk.Combobox(
+            company_frame, textvariable=self.company, state="readonly", width=14,
+            values=list(COMPANIES),
+        )
+        self.company_combo.pack(side=tk.LEFT)
+        self.company_hint = ttk.Label(company_frame, foreground="#555")
+        self.company_hint.pack(side=tk.LEFT, padx=10)
+        self.company_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_company_hint())
+        self._refresh_company_hint()
 
         # ── 文件選擇 ──────────────────────────────────────────────────────
         file_frame = ttk.LabelFrame(root_frame, text="  文件選擇  ", padding=12)
@@ -1040,6 +1121,12 @@ class App:
         else:
             self.pdf_label.config(text="（尚未選擇）", foreground="gray")
 
+    def _refresh_company_hint(self):
+        tax_id = COMPANIES[self.company.get()]
+        self.company_hint.config(
+            text=f"統編 {tax_id}　→　mo店+ {mo_sku_suffix(tax_id)}　Coupang {coupang_sku_suffix(tax_id)}"
+        )
+
     def _toggle_pw(self):
         self._pw_entry.config(show="" if self._show_pw.get() else "●")
 
@@ -1092,6 +1179,7 @@ class App:
 
         pw        = self.password.get()
         pdf_paths = list(self.pdf_files)
+        company   = self.company.get()
 
         self.start_btn.config(state=tk.DISABLED)
         self.pbar["value"] = 0
@@ -1099,6 +1187,7 @@ class App:
         self._log("開始轉換...")
         self._log(f"  mo店+   : {os.path.basename(mo_path) if mo_path else '（未選）'}")
         self._log(f"  Coupang : {os.path.basename(coupang_path) if coupang_path else '（未選）'}")
+        self._log(f"  公司    : {company}（統編 {COMPANIES[company]}）")
         self._log(f"  模板    : {os.path.basename(tmpl_path)}")
         self._log(f"  PDF 數  : {len(pdf_paths)} 個")
         self._log(f"  密碼    : {'已設定' if pw else '（無）'}")
@@ -1108,7 +1197,8 @@ class App:
             try:
                 convert_orders(
                     mo_path, tmpl_path, pdf_paths, pw,
-                    self._log, self._set_progress, coupang_path
+                    self._log, self._set_progress, coupang_path,
+                    company=company,
                 )
             except Exception as exc:
                 self._log(f"✗ 轉換失敗：{exc}")

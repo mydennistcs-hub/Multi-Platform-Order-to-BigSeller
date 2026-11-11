@@ -243,6 +243,59 @@ class OrderPipelineTests(unittest.TestCase):
             self.assertEqual(ws.cell(6, store_col).value, "酷澎 coupang")
             wb.close()
 
+    _MO_HEADERS_WITH_TAX = [
+        "訂單編號", "訂單狀態", "轉單日", "商品原廠編號", "數量", "收件人姓名",
+        "收件人地址", "物流商", "物流單號", "商品售價", "發票開立統編", "統編",
+    ]
+
+    def _convert_for_company(self, company: str, mo_tax_id: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmp_path = Path(tmp.name)
+        mo_path = tmp_path / "mo.xlsx"
+        coupang_path = tmp_path / "coupang.xlsx"
+        template_path = tmp_path / "template.xlsx"
+        self._write_source(
+            mo_path, self._MO_HEADERS_WITH_TAX,
+            ["MO1", "已印單", "2026-11-11 10:00:00", "0619", 1, "測試收件人", "測試地址",
+             "7-11店到店", "MTRACK", 149, "", mo_tax_id],
+        )
+        self._write_source(
+            coupang_path,
+            ["訂單編號", "快遞公司", "寄件單號", "訂購日期", "公司商品代碼", "數量", "選項價格", "訂購人姓名", "收件人地址"],
+            ["CP1", "新竹物流", "CTRACK", "2026-11-11 11:00:00", "SKU-C", 1, 200, "測試收件人", "測試地址"],
+        )
+        self._write_template(template_path)
+        converter.convert_orders(
+            str(mo_path), str(template_path), [], "", lambda _m: None, lambda _v: None,
+            coupang_path=str(coupang_path), company=company,
+        )
+        wb = openpyxl.load_workbook(template_path, data_only=True)
+        ws = wb.active
+        headers = [cell.value for cell in ws[1]]
+        col = {h: headers.index(h) + 1 for h in ("店铺", "发货仓库", "店铺SKU")}
+        rows = [{h: ws.cell(r, c).value for h, c in col.items()} for r in (5, 6)]
+        wb.close()
+        return rows
+
+    def test_dennis_su_orders_use_own_suffix_same_store_and_warehouse(self):
+        mo, cp = self._convert_for_company("丹尼書", "90154390")
+        self.assertEqual(mo["店铺SKU"], "0619-mo90154390")
+        self.assertEqual(cp["店铺SKU"], "SKU-C-cou90154390")
+        self.assertEqual(mo["店铺"], "mo店+")
+        self.assertEqual(cp["店铺"], "酷澎 coupang")
+        self.assertEqual(mo["发货仓库"], "樸翔初耘18號8樓 mo店+倉庫")
+        self.assertEqual(cp["发货仓库"], "樸翔初耘18號8樓 Coupang倉庫")
+
+    def test_growell_is_default_suffix(self):
+        mo, cp = self._convert_for_company("格魯維爾", "94234570")
+        self.assertEqual(mo["店铺SKU"], "0619-mo94234570")
+        self.assertEqual(cp["店铺SKU"], "SKU-C-cou94234570")
+
+    def test_mo_file_tax_id_must_match_selected_company(self):
+        with self.assertRaisesRegex(ValueError, "不符"):
+            self._convert_for_company("丹尼書", "94234570")
+
     @staticmethod
     def _write_source(path: Path, headers: list[str], values: list):
         wb = openpyxl.Workbook()
