@@ -131,7 +131,10 @@ COUPANG_WAREHOUSE = "樸翔初耘18號8樓 Coupang倉庫"
 
 BS_DATA_ROW  = 5
 PLATFORM_FEE = 0.235
-COUPANG_PLATFORM_FEE = 0.155
+# Coupang 优惠＝round(訂單商品金額 × 手續費率) ＋ 每張訂單代開發票費（2026-11-15 使用者拍板）。
+# 14.5% 是加入免運補貼專案後的費率（格魯維爾 2025-06-04 起、丹尼書 2026-11-03 起都已加入）。
+COUPANG_PLATFORM_FEE = 0.145
+COUPANG_INVOICE_FEE_PER_ORDER = 2
 
 # 公司 → 統編。兩家公司的店鋪名稱與倉庫相同（2026-11-12 使用者確認），
 # 只有店鋪 SKU 後綴不同：mo店+ 為 -mo{統編}、Coupang 為 -cou{統編}。
@@ -655,6 +658,35 @@ def _read_coupang_rows(path: str) -> tuple[list, dict]:
 
 # ── 主轉換邏輯 ─────────────────────────────────────────────────────────────────
 
+def _coupang_order_discounts(order_map) -> dict:
+    """算 Coupang 每一列的「优惠」，回傳 {order_map 的 key: 金額}。
+
+    整張訂單的优惠＝round(商品金額合計 × COUPANG_PLATFORM_FEE) ＋ COUPANG_INVOICE_FEE_PER_ORDER。
+    代開發票費是每張訂單一次，所以先以訂單為單位算總額，再依各列小計（單價×數量）比例分攤，
+    四捨五入到整數，尾差放在該訂單最後一列，確保各列加總剛好等於整張訂單的优惠。
+    """
+    by_order: dict = OrderedDict()
+    for key, d in order_map.items():
+        if d["source"] != "Coupang":
+            continue
+        by_order.setdefault(d["order_no"], []).append(key)
+
+    result: dict = {}
+    for keys in by_order.values():
+        subtotals = [(order_map[k]["price"] or 0) * (order_map[k]["qty"] or 0) for k in keys]
+        order_total = sum(subtotals)
+        order_discount = round(order_total * COUPANG_PLATFORM_FEE) + COUPANG_INVOICE_FEE_PER_ORDER
+        allocated = 0
+        for i, (k, sub) in enumerate(zip(keys, subtotals)):
+            if i == len(keys) - 1:
+                share = order_discount - allocated
+            else:
+                share = round(order_discount * sub / order_total) if order_total else 0
+                allocated += share
+            result[k] = share
+    return result
+
+
 def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, coupang_path="",
                    company=DEFAULT_COMPANY):
     if company not in COMPANIES:
@@ -903,9 +935,14 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         for cell in row:
             cell.value = None
 
+    coupang_discounts = _coupang_order_discounts(order_map)
+
     for idx, (key, d) in enumerate(order_map.items(), start=BS_DATA_ROW):
         progress(70 + int((idx - BS_DATA_ROW) / merged * 25))
-        discount = round((d["price"] or 0) * (d["qty"] or 0) * d["fee"], 2)
+        if key in coupang_discounts:
+            discount = coupang_discounts[key]
+        else:
+            discount = round((d["price"] or 0) * (d["qty"] or 0) * d["fee"], 2)
 
         out_ws.cell(row=idx, column=bs_cols["store"]).value     = d["store"]
         out_ws.cell(row=idx, column=bs_cols["order_no"]).value  = d["order_no"]

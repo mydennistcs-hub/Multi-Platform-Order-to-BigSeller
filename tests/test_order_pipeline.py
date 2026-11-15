@@ -16,6 +16,21 @@ class OrderPipelineTests(unittest.TestCase):
         self.assertEqual(converter.MO_STORE, "mo店+")
         self.assertEqual(converter.COUPANG_STORE, "酷澎 coupang")
 
+    def test_coupang_discount_is_rate_plus_invoice_fee_per_order(self):
+        # 單品：599 → round(599×14.5%)＋2＝89
+        single = {("Coupang", "A", "x"): {"source": "Coupang", "order_no": "A", "price": 599, "qty": 1}}
+        self.assertEqual(converter._coupang_order_discounts(single), {("Coupang", "A", "x"): 89})
+        # 多 SKU：599×2＋149＝1347 → round(195.315)＋2＝197，依小計分攤、尾差放最後一列；mo店+ 不受影響
+        multi = {
+            ("Coupang", "B", "x"): {"source": "Coupang", "order_no": "B", "price": 599, "qty": 2},
+            ("Coupang", "B", "y"): {"source": "Coupang", "order_no": "B", "price": 149, "qty": 1},
+            ("mo店+", "C", "z"): {"source": "mo店+", "order_no": "C", "price": 100, "qty": 1},
+        }
+        result = converter._coupang_order_discounts(multi)
+        self.assertEqual(result[("Coupang", "B", "x")] + result[("Coupang", "B", "y")], 197)
+        self.assertEqual(result[("Coupang", "B", "x")], 175)
+        self.assertNotIn(("mo店+", "C", "z"), result)
+
     def test_coupang_official_row_uses_available_api_fields(self):
         row = {
             "訂單編號": "ORDER1",
