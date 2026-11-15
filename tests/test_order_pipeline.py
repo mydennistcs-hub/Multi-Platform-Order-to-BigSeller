@@ -31,6 +31,30 @@ class OrderPipelineTests(unittest.TestCase):
         self.assertEqual(result[("Coupang", "B", "x")], 175)
         self.assertNotIn(("mo店+", "C", "z"), result)
 
+    def test_mo_discount_is_goods_total_minus_actual_income(self):
+        def row(order_no, price, qty, income, fee):
+            return {"source": "mo店+", "order_no": order_no, "price": price, "qty": qty,
+                    "mo_income": income, "mo_fee_adj": fee}
+
+        # 2026-11-12、11-15 實際訂單：219×4−(861−128)＝143；599−(629−129)＝99
+        orders = {
+            ("mo店+", "66111200702533", "a"): row("66111200702533", 219, 4, 861, -128),
+            ("mo店+", "66111500789259", "b"): row("66111500789259", 599, 1, 629, -129),
+            # 進帳是訂單層級、每列重複，只算一次：599×2＋149＝1347 −(1200−200)＝347，依小計分攤
+            ("mo店+", "M", "x"): row("M", 599, 2, 1200, -200),
+            ("mo店+", "M", "y"): row("M", 149, 1, 1200, -200),
+            # 舊 API 匯出檔沒有進帳欄 → 不放進結果，由呼叫端退回舊費率
+            ("mo店+", "OLD", "z"): row("OLD", 100, 1, None, None),
+            ("Coupang", "C", "w"): {"source": "Coupang", "order_no": "C", "price": 599, "qty": 1},
+        }
+        result = converter._mo_order_discounts(orders)
+        self.assertEqual(result[("mo店+", "66111200702533", "a")], 143)
+        self.assertEqual(result[("mo店+", "66111500789259", "b")], 99)
+        self.assertEqual(result[("mo店+", "M", "x")] + result[("mo店+", "M", "y")], 347)
+        self.assertEqual(result[("mo店+", "M", "x")], 309)
+        self.assertNotIn(("mo店+", "OLD", "z"), result)
+        self.assertNotIn(("Coupang", "C", "w"), result)
+
     def test_coupang_official_row_uses_available_api_fields(self):
         row = {
             "訂單編號": "ORDER1",

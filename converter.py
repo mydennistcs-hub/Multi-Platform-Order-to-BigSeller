@@ -84,6 +84,12 @@ BS = {
 # 用來檢查使用者選的公司是否正確；舊格式沒有這欄時不檢查。
 MO_SELLER_TAX_ID_HEADER = "統編"
 
+# mo店+ 後台「匯出報表」的實際入帳欄（訂單層級，同一張單每個品項列重複同一個數字）。
+# 2026-11-15 實測欄名是「訂單進帳金額」；文件曾寫成「訂單入帳金額」，兩種都認。
+# 舊的 API 匯出 .xlsx 沒有這兩欄，此時退回舊的 PLATFORM_FEE 估算並在 log 警告。
+MO_INCOME_HEADERS = ("訂單進帳金額", "訂單入帳金額")
+MO_FEE_ADJ_HEADER = "(預估)手續費_調整金額"
+
 MO_HEADERS = {
     "order_no":   ("訂單編號",),
     "status":     ("訂單狀態",),
@@ -587,6 +593,21 @@ def _decrypt_office(path: str, password: str) -> io.BytesIO | None:
     return buf
 
 
+def _add_mo_optional_columns(headers, columns: dict) -> None:
+    """mo店+ 選填欄位：賣家統編、訂單進帳金額、(預估)手續費_調整金額（找不到就不放進 columns）。"""
+    tax_col = _optional_column(headers, MO_SELLER_TAX_ID_HEADER)
+    if tax_col:
+        columns["seller_tax_id"] = tax_col
+    for name in MO_INCOME_HEADERS:
+        income_col = _optional_column(headers, name)
+        if income_col:
+            columns["income"] = income_col
+            break
+    fee_col = _optional_column(headers, MO_FEE_ADJ_HEADER)
+    if fee_col:
+        columns["fee_adj"] = fee_col
+
+
 def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
     ext = os.path.splitext(path)[1].lower()
     buf = _decrypt_office(path, password)   # None = 無加密
@@ -596,9 +617,7 @@ def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
         ws = wb.sheet_by_index(0)
         headers = ws.row_values(0)
         columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
-        tax_col = _optional_column(headers, MO_SELLER_TAX_ID_HEADER)
-        if tax_col:
-            columns["seller_tax_id"] = tax_col
+        _add_mo_optional_columns(headers, columns)
         rows = []
         for r in range(1, ws.nrows):
             vals  = ws.row_values(r)
@@ -618,9 +637,7 @@ def _read_mo_rows(path: str, password: str = "") -> tuple[list, dict]:
         ws = wb.active
         headers = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
         columns = _resolve_columns(headers, MO_HEADERS, "mo店+ 訂單 Excel")
-        tax_col = _optional_column(headers, MO_SELLER_TAX_ID_HEADER)
-        if tax_col:
-            columns["seller_tax_id"] = tax_col
+        _add_mo_optional_columns(headers, columns)
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         wb.close()
         return rows, columns
@@ -673,17 +690,59 @@ def _coupang_order_discounts(order_map) -> dict:
 
     result: dict = {}
     for keys in by_order.values():
-        subtotals = [(order_map[k]["price"] or 0) * (order_map[k]["qty"] or 0) for k in keys]
-        order_total = sum(subtotals)
+        order_total = sum(_subtotal(order_map[k]) for k in keys)
         order_discount = round(order_total * COUPANG_PLATFORM_FEE) + COUPANG_INVOICE_FEE_PER_ORDER
-        allocated = 0
-        for i, (k, sub) in enumerate(zip(keys, subtotals)):
-            if i == len(keys) - 1:
-                share = order_discount - allocated
-            else:
-                share = round(order_discount * sub / order_total) if order_total else 0
-                allocated += share
-            result[k] = share
+        result.update(_allocate_order_discount(order_map, keys, order_discount))
+    return result
+
+
+def _subtotal(d: dict):
+    return (d["price"] or 0) * (d["qty"] or 0)
+
+
+def _allocate_order_discount(order_map, keys: list, order_discount) -> dict:
+    """把整張訂單的优惠依各列小計比例分攤（四捨五入到整數），尾差放最後一列。"""
+    subtotals = [_subtotal(order_map[k]) for k in keys]
+    order_total = sum(subtotals)
+    result: dict = {}
+    allocated = 0
+    for i, (k, sub) in enumerate(zip(keys, subtotals)):
+        if i == len(keys) - 1:
+            share = order_discount - allocated
+        else:
+            share = round(order_discount * sub / order_total) if order_total else 0
+            allocated += share
+        result[k] = share
+    return result
+
+
+def _mo_order_discounts(order_map, log=lambda *_: None) -> dict:
+    """算 mo店+ 每一列的「优惠」，回傳 {order_map 的 key: 金額}（2026-11-15 使用者要求寫進程式）。
+
+    整張訂單的优惠＝商品售價×數量合計 −（訂單進帳金額 − |(預估)手續費_調整金額|）。
+    進帳與手續費是訂單層級、每個品項列重複的數字，只取一次，再依小計比例分攤、尾差放最後一列。
+    匯出檔沒有這兩欄（例如舊的 API 匯出 .xlsx）或該單欄位空白時，該單不放進結果，
+    由呼叫端退回舊的 PLATFORM_FEE 估算。
+    """
+    by_order: dict = OrderedDict()
+    for key, d in order_map.items():
+        if d["source"] != "mo店+":
+            continue
+        by_order.setdefault(d["order_no"], []).append(key)
+
+    result: dict = {}
+    for order_no, keys in by_order.items():
+        first = order_map[keys[0]]
+        income, fee_adj = first.get("mo_income"), first.get("mo_fee_adj")
+        if income is None or fee_adj is None:
+            log(f"  [警告] mo店+ {order_no}：匯出檔沒有「訂單進帳金額」或「(預估)手續費_調整金額」，"
+                f"优惠改用舊的 {PLATFORM_FEE:.1%} 估算，請到後台訂單詳情確認後手動修正")
+            continue
+        order_total = sum(_subtotal(order_map[k]) for k in keys)
+        order_discount = round(order_total - (income - abs(fee_adj)))
+        if order_discount < 0:
+            log(f"  [警告] mo店+ {order_no}：算出的优惠是負數（{order_discount}），請到後台核對入帳金額")
+        result.update(_allocate_order_discount(order_map, keys, order_discount))
     return result
 
 
@@ -813,6 +872,9 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
                 "sku": f"{str(_cell(row, mo_cols['sku']) or '').strip()}{mo_suffix}",
                 "price": _as_number(_cell(row, mo_cols["price"])),
                 "qty": _as_number(_cell(row, mo_cols["qty"])),
+                # 訂單層級的實際入帳，用來算优惠；沒有欄位或空白時為 None
+                "mo_income": _as_number(_cell(row, mo_cols["income"]), None) if "income" in mo_cols else None,
+                "mo_fee_adj": _as_number(_cell(row, mo_cols["fee_adj"]), None) if "fee_adj" in mo_cols else None,
             })
 
         log(f"mo店+ 篩選出 {len(mo_rows)} 筆待處理訂單行")
@@ -935,12 +997,13 @@ def convert_orders(mo_path, template_path, pdf_paths, password, log, progress, c
         for cell in row:
             cell.value = None
 
-    coupang_discounts = _coupang_order_discounts(order_map)
+    order_discounts = _coupang_order_discounts(order_map)
+    order_discounts.update(_mo_order_discounts(order_map, log))
 
     for idx, (key, d) in enumerate(order_map.items(), start=BS_DATA_ROW):
         progress(70 + int((idx - BS_DATA_ROW) / merged * 25))
-        if key in coupang_discounts:
-            discount = coupang_discounts[key]
+        if key in order_discounts:
+            discount = order_discounts[key]
         else:
             discount = round((d["price"] or 0) * (d["qty"] or 0) * d["fee"], 2)
 
