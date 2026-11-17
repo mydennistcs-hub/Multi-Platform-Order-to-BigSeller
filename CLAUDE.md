@@ -39,6 +39,12 @@ BigSeller 目前啟用的店鋪暱稱完全一致；倉庫名稱與 SKU 後綴�
 就先到後台重印一次明細確認，不要直接當成查不到真名。`converter.py` 本來就會優先用 PDF 上的姓名，
 匯入時選這份重印的明細就能自動帶入真名。
 
+**專案 skill `ship-orders-to-bigseller`（2026-11-17 新增）**：
+- 用途：把 mo店+／Coupang「先去重，再出貨、下載 PDF，最後做 BigSeller 匯入檔」的完整流程整理成 skill。
+- 位置：`.claude/skills/ship-orders-to-bigseller/SKILL.md`。`.gitignore` 只放行 `.claude/skills/`，所以 skill 有進版控。
+- 流程有變動時，這份 CLAUDE.md 和 skill 要一起改。
+- 待補：OpenMall 尚未支援。
+
 **mo店+ 出單到 BigSeller Excel 的標準流程（2026-11-12 實際跑過 4 張格魯維爾訂單）**：
 1. 用 Chrome 開 mo店+ 後台，先看右上角帳號名稱確認公司（格魯維爾＝Superior Choice-000，丹尼書＝Awesome Po-000）。
 2. E001訂單管理 →「未出貨」逐張按「操作 → 可出貨」→ 勾選全部品項 →「確認提交」。⚠️ 這一步會把訂單改成「已印單」，

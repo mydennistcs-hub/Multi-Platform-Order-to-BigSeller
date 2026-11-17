@@ -24,4 +24,6 @@ shopify-app-config/
 .DS_Store
 Thumbs.db
 .vscode/
-.claude/
+# .claude/ 只把專案 skill 納入版控（2026-11-17），其餘（如 settings.local.json）仍排除
+.claude/*
+!.claude/skills/
