@@ -1,6 +1,6 @@
 ---
 name: ship-orders-to-bigseller
-description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹尼書）的新訂單：先查 BigSeller 和 Data 避免重複，再出貨、下載物流單／出貨明細 PDF、匯出訂單報表，最後用 converter.py 產生 BigSeller 匯入 Excel，全部放進本專案 Data\。使用者說「有新訂單請安排出貨」「幫我做匯入檔」「mo店+／酷澎有新單」時使用。OpenMall 尚未支援。
+description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹尼書）的新訂單：先查 BigSeller 和 Data 避免重複，再出貨、下載物流單／出貨明細 PDF、匯出訂單報表，用 converter.py 產生 BigSeller 匯入 Excel（全部放進本專案 Data\），最後經使用者同意後上傳匯入 BigSeller 並讀回核對。使用者說「有新訂單請安排出貨」「幫我做匯入檔」「mo店+／酷澎有新單」「匯入 BigSeller」時使用。OpenMall 尚未支援。
 ---
 
 # 平台訂單出貨 → BigSeller 匯入檔
@@ -12,7 +12,8 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
 - **會改變平台狀態的按鈕，按之前一定先問使用者**（列出訂單編號、品項、物流方式、出貨地址），等明確同意才按：
   - mo店+：「可出貨」→「確認提交」（訂單變成已印單，無法復原）。
   - Coupang Wing：「確認訂單」、「安排出貨」→「提交」（無法復原）。
-  - BigSeller：任何匯入、打單、出庫。本 skill 只產生 Excel，**不代為匯入 BigSeller**，除非使用者在當次明確交代。
+  - BigSeller 匯入：可以由 Claude 上傳檔案，但**按「确定」前一定先停下來問**（2026-11-18 使用者同意列為固定流程，見第 6 步）。
+  - BigSeller 打單、出庫：不代做，由使用者自己處理。
 - 重新列印、匯出報表、搜尋、讀取頁面是唯讀，可直接做。
 - 遇到登入頁或驗證碼，請使用者自己完成，不輸入帳密。
 - 出貨地一律是 **桃園市中壢區南園二路381巷18號8樓**；畫面上不是這個地址就停下來問。
@@ -35,7 +36,7 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
 ## 2. 去重（每次動手前必做）
 
 1. **查 Data\**：讀 `Data\import_manual_order_*.xlsx`（模板 `import_manual_order_template_cn.xlsx` 除外）的「订单号」欄，列出已做好匯入檔的訂單編號。
-2. **查 BigSeller**（0970 的 BigSeller，`https://www.bigseller.com/web/order/index.htm?status=all`）：在「全部订单」用訂單編號批次搜尋（逗號分隔）。頁面一開始可能空白，等幾秒再讀。已匯入的單可能不在「待處理」，而是在「待打单」等其他分頁，所以要用全部订单搜尋。
+2. **查 BigSeller**（0970 的 BigSeller，`https://www.bigseller.com/web/order/index.htm?status=all`）：在「全部订单」用訂單編號批次搜尋（逗號分隔）。頁面一開始可能空白或一直轉圈：先開 `https://www.bigseller.com/web/index.htm`（會轉到首頁），再回訂單頁等約 10 秒。已匯入的單可能不在「待處理」，而是在「待打单」等其他分頁，所以要用全部订单搜尋。
 3. 平台上的新單扣掉上面兩者，剩下的才處理。
    - 已出貨、BigSeller 沒有、Data 也沒有匯入檔的單：只補做匯入檔，不再出貨。
    - Data 有匯入檔、BigSeller 沒有：提醒使用者匯入，不重做。
@@ -87,12 +88,25 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
    - mo店+：`售價×數量 −（訂單進帳金額 − |(預估)手續費_調整金額|）`，v0.26 自動計算。log 出現 `[警告]` 才手動改。
    - Coupang：`round(售價×數量×14.5%) + 2`，v0.25 自動計算。
 6. 收件人姓名、地址：從各來源取最完整的版本，全部都遮罩時才用「王Ｏ明」格式。
+   - Coupang 新竹寄件單 PDF 是圖片型，converter 讀不到，要直接看 PDF。地址通常比 DeliveryList 完整（例如「******東勢街30號1樓」對「***** ******1樓」），讀到更完整的就手動寫回輸出檔。
 
-## 6. 回報
+## 6. 匯入 BigSeller（2026-11-18 起固定流程）
+
+在 0970 的 BigSeller 操作：
+
+1. 用第 2 步的方式再搜尋一次這批訂單號，確認是「暂无数据」，不重複匯入。
+2. 訂單頁右上「导入」→「导入手工订单」。選單用座標點常會收起來，改用 `find` 找到「导入手工订单」的元素參考再點。
+3. 視窗裡的檔案輸入框是隱藏的：用 `find` 找 file-input 的參考，再用 `file_upload` 上傳 Data 裡的匯入檔。**不要點上傳區塊**，那會打開看不到的 Windows 選檔視窗。
+4. 「导入订单时同步新增客户」維持預設勾選，除非使用者另有交代。
+5. **停下來問使用者**：列出檔名、訂單號、筆數，同意後才按「确定」。
+6. 結果視窗看「操作成功／操作失敗」筆數，失敗要把原因原文回報給使用者。
+7. 關掉結果視窗，用訂單號搜尋讀回：店鋪、SKU、單價×數量、訂單金額（＝單價×數量−优惠）、收件人、物流／運單號、狀態。
+
+## 7. 回報
 
 - 每張單列出：訂單編號、收件人、SKU×數量、优惠、物流／運單號、寄件期限。
 - 變更的檔案：Data\ 新增了哪些檔案，下載資料夾哪些原檔移到了資源回收筒。
 - 下一步：
   - 寄件期限：mo 超取通常是出貨後隔天，Coupang 7-11 以寄件單上的期限為準。
-  - 提醒使用者自己把匯入檔匯入 BigSeller。
-  - 匯入後如果需要，用本 skill 第 2 步的搜尋方式幫忙核對。
+  - 還沒匯入 BigSeller 的話，問使用者要不要照第 6 步匯入。
+  - 已匯入的話，提醒使用者在 BigSeller 打單、出庫。

@@ -44,6 +44,12 @@ BigSeller 目前啟用的店鋪暱稱完全一致；倉庫名稱與 SKU 後綴�
 - 位置：`.claude/skills/ship-orders-to-bigseller/SKILL.md`。`.gitignore` 只放行 `.claude/skills/`，所以 skill 有進版控。
 - 流程有變動時，這份 CLAUDE.md 和 skill 要一起改。
 - 待補：OpenMall 尚未支援。
+- **2026-11-18 起匯入 BigSeller 也納入固定流程**（使用者同意）：
+  - Claude 在 0970 的 BigSeller 用「导入 → 导入手工订单」，以 `file_upload` 上傳 Data 的匯入檔。
+  - **按「确定」前一定先問使用者**，匯入後用訂單號搜尋讀回核對。
+  - 打單、出庫仍由使用者自己做。
+  - 第一次實測：丹尼書 Coupang 128104346233721，成功 1 筆，BigSeller 單號 BSKXBR026526。
+  - 操作細節見 skill 第 6 步。
 
 **mo店+ 出單到 BigSeller Excel 的標準流程（2026-11-12 實際跑過 4 張格魯維爾訂單）**：
 1. 用 Chrome 開 mo店+ 後台，先看右上角帳號名稱確認公司（格魯維爾＝Superior Choice-000，丹尼書＝Awesome Po-000）。
