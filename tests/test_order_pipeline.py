@@ -20,15 +20,15 @@ class OrderPipelineTests(unittest.TestCase):
         # 單品：599 → round(599×14.5%)＋2＝89
         single = {("Coupang", "A", "x"): {"source": "Coupang", "order_no": "A", "price": 599, "qty": 1}}
         self.assertEqual(converter._coupang_order_discounts(single), {("Coupang", "A", "x"): 89})
-        # 多 SKU：599×2＋149＝1347 → round(195.315)＋2＝197，依小計分攤、尾差放最後一列；mo店+ 不受影響
+        # 多 SKU：599×2＋149＝1347 → round(195.315)＋2＝197，每列都寫總額（BigSeller 只讀第一列）；mo店+ 不受影響
         multi = {
             ("Coupang", "B", "x"): {"source": "Coupang", "order_no": "B", "price": 599, "qty": 2},
             ("Coupang", "B", "y"): {"source": "Coupang", "order_no": "B", "price": 149, "qty": 1},
             ("mo店+", "C", "z"): {"source": "mo店+", "order_no": "C", "price": 100, "qty": 1},
         }
         result = converter._coupang_order_discounts(multi)
-        self.assertEqual(result[("Coupang", "B", "x")] + result[("Coupang", "B", "y")], 197)
-        self.assertEqual(result[("Coupang", "B", "x")], 175)
+        self.assertEqual(result[("Coupang", "B", "x")], 197)
+        self.assertEqual(result[("Coupang", "B", "y")], 197)
         self.assertNotIn(("mo店+", "C", "z"), result)
 
     def test_mo_discount_is_goods_total_minus_actual_income(self):
@@ -40,7 +40,7 @@ class OrderPipelineTests(unittest.TestCase):
         orders = {
             ("mo店+", "66111200702533", "a"): row("66111200702533", 219, 4, 861, -128),
             ("mo店+", "66111500789259", "b"): row("66111500789259", 599, 1, 629, -129),
-            # 進帳是訂單層級、每列重複，只算一次：599×2＋149＝1347 −(1200−200)＝347，依小計分攤
+            # 進帳是訂單層級、每列重複，只算一次：599×2＋149＝1347 −(1200−200)＝347，每列都寫總額
             ("mo店+", "M", "x"): row("M", 599, 2, 1200, -200),
             ("mo店+", "M", "y"): row("M", 149, 1, 1200, -200),
             # 舊 API 匯出檔沒有進帳欄 → 不放進結果，由呼叫端退回舊費率
@@ -50,8 +50,8 @@ class OrderPipelineTests(unittest.TestCase):
         result = converter._mo_order_discounts(orders)
         self.assertEqual(result[("mo店+", "66111200702533", "a")], 143)
         self.assertEqual(result[("mo店+", "66111500789259", "b")], 99)
-        self.assertEqual(result[("mo店+", "M", "x")] + result[("mo店+", "M", "y")], 347)
-        self.assertEqual(result[("mo店+", "M", "x")], 309)
+        self.assertEqual(result[("mo店+", "M", "x")], 347)
+        self.assertEqual(result[("mo店+", "M", "y")], 347)
         self.assertNotIn(("mo店+", "OLD", "z"), result)
         self.assertNotIn(("Coupang", "C", "w"), result)
 

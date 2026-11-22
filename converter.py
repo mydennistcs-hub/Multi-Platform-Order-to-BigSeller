@@ -679,8 +679,8 @@ def _coupang_order_discounts(order_map) -> dict:
     """算 Coupang 每一列的「优惠」，回傳 {order_map 的 key: 金額}。
 
     整張訂單的优惠＝round(商品金額合計 × COUPANG_PLATFORM_FEE) ＋ COUPANG_INVOICE_FEE_PER_ORDER。
-    代開發票費是每張訂單一次，所以先以訂單為單位算總額，再依各列小計（單價×數量）比例分攤，
-    四捨五入到整數，尾差放在該訂單最後一列，確保各列加總剛好等於整張訂單的优惠。
+    代開發票費是每張訂單一次，所以先以訂單為單位算總額，再把總額寫在該訂單的每一列
+    （BigSeller 只讀同一訂單第一列的优惠，見 _repeat_order_discount）。
     """
     by_order: dict = OrderedDict()
     for key, d in order_map.items():
@@ -692,7 +692,7 @@ def _coupang_order_discounts(order_map) -> dict:
     for keys in by_order.values():
         order_total = sum(_subtotal(order_map[k]) for k in keys)
         order_discount = round(order_total * COUPANG_PLATFORM_FEE) + COUPANG_INVOICE_FEE_PER_ORDER
-        result.update(_allocate_order_discount(order_map, keys, order_discount))
+        result.update(_repeat_order_discount(keys, order_discount))
     return result
 
 
@@ -700,27 +700,21 @@ def _subtotal(d: dict):
     return (d["price"] or 0) * (d["qty"] or 0)
 
 
-def _allocate_order_discount(order_map, keys: list, order_discount) -> dict:
-    """把整張訂單的优惠依各列小計比例分攤（四捨五入到整數），尾差放最後一列。"""
-    subtotals = [_subtotal(order_map[k]) for k in keys]
-    order_total = sum(subtotals)
-    result: dict = {}
-    allocated = 0
-    for i, (k, sub) in enumerate(zip(keys, subtotals)):
-        if i == len(keys) - 1:
-            share = order_discount - allocated
-        else:
-            share = round(order_discount * sub / order_total) if order_total else 0
-            allocated += share
-        result[k] = share
-    return result
+def _repeat_order_discount(keys: list, order_discount) -> dict:
+    """同一張訂單的每一列都寫整張單的优惠總額（v0.27，2026-11-23）。
+
+    BigSeller 手工訂單匯入時，同一訂單號只讀第一列的优惠，其餘列的优惠會被忽略。
+    舊版依小計比例分攤，多 SKU 訂單會少扣（實例：66112200006315 分攤成 28＋18，
+    BigSeller 只扣 28，訂單金額 550，應為 578−46＝532）。每列都寫總額，不論讀哪一列都正確。
+    """
+    return {k: order_discount for k in keys}
 
 
 def _mo_order_discounts(order_map, log=lambda *_: None) -> dict:
     """算 mo店+ 每一列的「优惠」，回傳 {order_map 的 key: 金額}（2026-11-15 使用者要求寫進程式）。
 
     整張訂單的优惠＝商品售價×數量合計 −（訂單進帳金額 − |(預估)手續費_調整金額|）。
-    進帳與手續費是訂單層級、每個品項列重複的數字，只取一次，再依小計比例分攤、尾差放最後一列。
+    進帳與手續費是訂單層級、每個品項列重複的數字，只取一次，總額寫在該訂單每一列。
     匯出檔沒有這兩欄（例如舊的 API 匯出 .xlsx）或該單欄位空白時，該單不放進結果，
     由呼叫端退回舊的 PLATFORM_FEE 估算。
     """
@@ -742,7 +736,7 @@ def _mo_order_discounts(order_map, log=lambda *_: None) -> dict:
         order_discount = round(order_total - (income - abs(fee_adj)))
         if order_discount < 0:
             log(f"  [警告] mo店+ {order_no}：算出的优惠是負數（{order_discount}），請到後台核對入帳金額")
-        result.update(_allocate_order_discount(order_map, keys, order_discount))
+        result.update(_repeat_order_discount(keys, order_discount))
     return result
 
 
