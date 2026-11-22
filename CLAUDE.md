@@ -50,6 +50,11 @@ BigSeller 目前啟用的店鋪暱稱完全一致；倉庫名稱與 SKU 後綴�
   - 打單、出庫仍由使用者自己做。
   - 第一次實測：丹尼書 Coupang 128104346233721，成功 1 筆，BigSeller 單號 BSKXBR026526。
   - 操作細節見 skill 第 6 步。
+- **2026-11-21 起下載的 PDF 檔名要看得出平台和物流**（使用者要求）：
+  - mo店+ 的 PDF 複製進 Data 時改成 `{yyyyMMdd}_{HHMMSS}_{統編}_mo店+_{物流}_{標籤|明細|出貨總表}.pdf`，比照 Coupang 的 `{yyyyMMdd}_{HHMMSS}_{統編}_coupang_{物流}.pdf`。
+  - 舊檔不改名。
+  - converter 讀的是 PDF 內容，不依賴檔名（2026-11-21 查過 `converter.py`）。
+  - 規則見 skill 第 5 步第 1 點。
 
 **mo店+ 出單到 BigSeller Excel 的標準流程（2026-11-12 實際跑過 4 張格魯維爾訂單）**：
 1. 用 Chrome 開 mo店+ 後台，先看右上角帳號名稱確認公司（格魯維爾＝Superior Choice-000，丹尼書＝Awesome Po-000）。

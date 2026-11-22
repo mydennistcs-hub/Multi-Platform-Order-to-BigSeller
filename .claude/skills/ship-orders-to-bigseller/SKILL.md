@@ -53,7 +53,7 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
 5. 匯出報表：「配送中」→「匯出報表」。
    - 搜尋欄清空會匯出全部配送中的單；converter 只挑「已印單／已印單待寄件」的列。
    - 如果裡面有之前已匯入、但仍是已印單的單，會重複轉出。這時改用訂單編號搜尋，只匯出這次的單。
-6. 檔名格式（後台自動產生）：`LogisticsLabel_/LogisticsDetail_/LogisticsData_/OrderExport_TP0001949_{yyyyMMddHHmmss}`。
+6. 後台自動產生的檔名是 `LogisticsLabel_/LogisticsDetail_/LogisticsData_/OrderExport_TP0001949_{yyyyMMddHHmmss}`，看不出平台和物流。PDF 複製進 Data 時要改名（見第 5 步第 1 點），OrderExport 報表維持原名。
 7. 收件人真名：明細 PDF 是遮罩名時，用「重新列印 → 列印明細」再下載一次確認，不要直接當成查不到。
 
 ## 4. Coupang 出貨（Wing）
@@ -64,10 +64,13 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
 2. 「配送準備」→「安排出貨」，核對取貨地址是 18 號 8 樓 →（先問使用者）→「提交」。
    - 宅配一律新竹物流（HCT）。7-11 的退貨門市沿用後台預設，不改。
 3. 寄件單：
-   - 宅配（新竹）：「列印寄件單」只把 PDF 載進頁面，不會存檔，要從頁面另存。
+   - 宅配（新竹）：「列印寄件單」只把 PDF 載進頁面，不會存檔，要從頁面另存。PDF 在頁面的 `iframe[src^="blob:"]` 裡：用 JS `fetch` 該 blob，確認開頭是 `%PDF-` 後用 `<a download>` 存成下面的檔名。
+   - ⚠️ 按過「列印寄件單」後，頁面常會卡住，之後的點擊都沒反應（2026-11-22 實測）。每印完一張就重新載入頁面，再印下一張或做其他操作。
    - 7-11：寄件單開在空白新分頁，另存成 HTML 後用 `api_sync/qt_html_pdf.py` 轉 A4 PDF。
    - 檔名：`{yyyyMMdd}_{HHMMSS}_{統編}_coupang_{物流}.pdf`。
-4. DeliveryList：「下載Excel」可能被 Chrome 擋下，擋下就讀頁面內容在本機重建，檔名 `DeliveryList_{yyyyMMddHHmmss}_{公司}.xlsx`。
+4. DeliveryList：在「配送指示」按「下載Excel」，下載檔名是 `DeliveryList(yyyy-MM-dd)_(0).xlsx`，複製進 Data 時改成 `DeliveryList_{yyyyMMddHHmmss}_{公司}.xlsx`。
+   - ⚠️ 剛用 JS 存過寄件單或列印過的頁面，按「下載Excel」常常沒反應、什麼都沒下載（2026-11-22 實測）。重新載入頁面、回到「配送指示」再按一次，就能正常下載。按完要到下載資料夾確認檔案真的有出現。
+   - 重新載入後還是下載不了，才讀頁面內容在本機重建。
 5. 7-11 運單號：Excel 只有前 8 碼，完整 12 碼在寄件單「交貨便服務代碼」。converter 讀得到寄件單時會自動補齊，轉完要讀回確認。
 6. Surfshark 固定 IP 有連上時，也可以改用 API 主控台（`啟動API主控台.bat`）走 ①②③。
 
@@ -75,6 +78,13 @@ description: 用 Claude in Chrome 處理 mo店+／Coupang（格魯維爾、丹�
 
 1. 下載的檔案從 `C:\Users\FG\Downloads` 複製到 `Data\`，確認複製成功後，把下載資料夾的原檔移到資源回收筒：
    `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(path,'OnlyErrorDialogs','SendToRecycleBin')`
+   - **PDF 檔名要看得出平台和物流**（2026-11-21 使用者要求）。複製進 Data 時直接用新檔名：
+     - mo店+：`{yyyyMMdd}_{HHMMSS}_{統編}_mo店+_{物流}_{標籤|明細|出貨總表}.pdf`。日期時間沿用後台檔名上的時間戳。物流寫 `7-11`、`全家` 或 `新竹`（第三方物流）。
+       例：`LogisticsLabel_TP0001949_20261121143015.pdf` → `20261121_143015_94234570_mo店+_7-11_標籤.pdf`。
+     - Coupang：`{yyyyMMdd}_{HHMMSS}_{統編}_coupang_{物流}.pdf`（第 4 步的現行格式，不變）。
+   - 比對雜湊要拿 Downloads 原檔和 Data 新檔名那份比。
+   - 只套用新下載的檔案，Data 裡 2026-11-21 以前的舊檔不改名（使用者決定）。
+   - converter 讀的是 PDF 內容，不看檔名，改名不影響轉檔。
 2. 複製 `Data\import_manual_order_template_cn.xlsx` 成輸出檔：`import_manual_order_{yyyyMMdd}_{公司}{平台}[_補充].xlsx`，例如 `import_manual_order_20261117_格魯維爾mo店+.xlsx`。**模板本身不可修改。**
 3. 執行（`PYTHONIOENCODING=utf-8`，用專案 `.venv`）：
    ```
